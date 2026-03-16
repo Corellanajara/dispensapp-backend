@@ -3,6 +3,8 @@ import { body, query, validationResult } from 'express-validator';
 import { Product } from '../models/Product';
 import { authenticate, authorize, AuthRequest } from '../middleware/auth';
 import { auditLog } from '../middleware/audit';
+import { upload } from '../middleware/upload';
+import { uploadFile, deleteFile } from '../services/storage';
 
 const router = Router();
 
@@ -199,6 +201,43 @@ router.delete(
     } catch (error) {
       console.error('Delete product error:', error);
       res.status(500).json({ message: 'Error al eliminar producto.' });
+    }
+  }
+);
+
+
+// POST /api/products/:id/image
+router.post(
+  '/:id/image',
+  authenticate,
+  authorize('admin', 'operador', 'produccion'),
+  upload.single('imagen'),
+  async (req: AuthRequest, res: Response): Promise<void> => {
+    try {
+      const product = await Product.findById(req.params.id);
+      if (!product) {
+        res.status(404).json({ message: 'Producto no encontrado.' });
+        return;
+      }
+
+      if (!req.file) {
+        res.status(400).json({ message: 'No se proporcionó imagen.' });
+        return;
+      }
+
+      // Eliminar imagen anterior si existe
+      if (product.imagen) {
+        await deleteFile(product.imagen);
+      }
+
+      const imageUrl = await uploadFile(req.file);
+      product.imagen = imageUrl;
+      await product.save();
+
+      res.json(product);
+    } catch (error) {
+      console.error('Upload product image error:', error);
+      res.status(500).json({ message: 'Error al subir imagen del producto.' });
     }
   }
 );

@@ -17,6 +17,8 @@ import financeRoutes from './routes/finance';
 import userRoutes from './routes/users';
 import reportRoutes from './routes/reports';
 import auditRoutes from './routes/audit';
+import paymentRoutes from './routes/payments';
+import signatureRoutes from './routes/signatures';
 
 const app = express();
 
@@ -41,6 +43,8 @@ app.use('/api/finance', financeRoutes);
 app.use('/api/users', userRoutes);
 app.use('/api/reports', reportRoutes);
 app.use('/api/audit', auditRoutes);
+app.use('/api/payments', paymentRoutes);
+app.use('/api/signatures', signatureRoutes);
 
 // Health check
 app.get('/api/health', (_req, res) => {
