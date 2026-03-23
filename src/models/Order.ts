@@ -41,7 +41,7 @@ export interface IPaymentAttempt {
   transactionId: string;
   provider: string;
   monto: number;
-  metodo: 'debito' | 'credito';
+  metodo: 'debito' | 'credito' | 'flow';
   cuotas?: number;
   estado: PaymentStatus;
   ultimosDigitos?: string;
@@ -49,6 +49,9 @@ export interface IPaymentAttempt {
   mensaje?: string;
   fecha: Date;
   raw?: Record<string, unknown>;
+  flowToken?: string;
+  flowOrderNumber?: number;
+  redirectUrl?: string;
 }
 
 export interface IOrderPayment {
@@ -130,7 +133,7 @@ const paymentAttemptSchema = new Schema(
     transactionId: { type: String, required: true },
     provider: { type: String, required: true },
     monto: { type: Number, required: true },
-    metodo: { type: String, enum: ['debito', 'credito'], required: true },
+    metodo: { type: String, enum: ['debito', 'credito', 'flow'], required: true },
     cuotas: { type: Number },
     estado: {
       type: String,
@@ -142,6 +145,9 @@ const paymentAttemptSchema = new Schema(
     mensaje: { type: String },
     fecha: { type: Date, default: Date.now },
     raw: { type: Schema.Types.Mixed },
+    flowToken: { type: String },
+    flowOrderNumber: { type: Number },
+    redirectUrl: { type: String },
   },
   { _id: true }
 );

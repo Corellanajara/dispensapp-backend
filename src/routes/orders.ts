@@ -2,6 +2,7 @@ import { Router, Response } from 'express';
 import { body, query, validationResult } from 'express-validator';
 import { Order, OrderStatus } from '../models/Order';
 import { Patient } from '../models/Patient';
+import { ensurePatientProfileForUser } from '../services/ensurePatientProfile';
 import { Product } from '../models/Product';
 import { InventoryMovement } from '../models/Inventory';
 import { FinanceTransaction } from '../models/Finance';
@@ -64,9 +65,12 @@ router.get(
   authorize('paciente'),
   async (req: AuthRequest, res: Response): Promise<void> => {
     try {
-      const patient = await Patient.findOne({ usuario: req.user!._id });
+      const patient = await ensurePatientProfileForUser(req.user!);
       if (!patient) {
-        res.status(404).json({ message: 'Perfil de paciente no encontrado.' });
+        res.status(409).json({
+          message:
+            'No se pudo vincular tu cuenta con un perfil de paciente. Si ya existe una ficha con tu RUT en el sistema, contacta al dispensario.',
+        });
         return;
       }
 
@@ -127,9 +131,12 @@ router.post(
 
     try {
       // Auto-resolve patient from authenticated user
-      const patient = await Patient.findOne({ usuario: req.user!._id });
+      const patient = await ensurePatientProfileForUser(req.user!);
       if (!patient) {
-        res.status(404).json({ message: 'Perfil de paciente no encontrado.' });
+        res.status(409).json({
+          message:
+            'No se pudo vincular tu cuenta con un perfil de paciente. Si ya existe una ficha con tu RUT en el sistema, contacta al dispensario.',
+        });
         return;
       }
 
@@ -208,9 +215,12 @@ router.get(
   authorize('paciente'),
   async (req: AuthRequest, res: Response): Promise<void> => {
     try {
-      const patient = await Patient.findOne({ usuario: req.user!._id });
+      const patient = await ensurePatientProfileForUser(req.user!);
       if (!patient) {
-        res.status(404).json({ message: 'Perfil de paciente no encontrado.' });
+        res.status(409).json({
+          message:
+            'No se pudo vincular tu cuenta con un perfil de paciente. Si ya existe una ficha con tu RUT en el sistema, contacta al dispensario.',
+        });
         return;
       }
 
@@ -244,9 +254,12 @@ router.patch(
   auditLog('cancelar', 'pedido'),
   async (req: AuthRequest, res: Response): Promise<void> => {
     try {
-      const patient = await Patient.findOne({ usuario: req.user!._id });
+      const patient = await ensurePatientProfileForUser(req.user!);
       if (!patient) {
-        res.status(404).json({ message: 'Perfil de paciente no encontrado.' });
+        res.status(409).json({
+          message:
+            'No se pudo vincular tu cuenta con un perfil de paciente. Si ya existe una ficha con tu RUT en el sistema, contacta al dispensario.',
+        });
         return;
       }
 
@@ -279,6 +292,116 @@ router.patch(
     } catch (error) {
       console.error('Cancel patient order error:', error);
       res.status(500).json({ message: 'Error al cancelar pedido.' });
+    }
+  }
+);
+
+// POST /api/orders/flow-webhook — Flow.cl payment webhook (server-to-server, no auth)
+router.post(
+  '/flow-webhook',
+  async (req: AuthRequest, res: Response): Promise<void> => {
+    try {
+      const { paymentData, paymentStatus, cartId } = req.body;
+
+      if (!cartId) {
+        res.status(400).json({ message: 'cartId es requerido.' });
+        return;
+      }
+
+      const order = await Order.findById(cartId);
+      if (!order) {
+        res.status(404).json({ message: 'Pedido no encontrado.' });
+        return;
+      }
+
+      // Map Flow.cl integer status to PaymentStatus string
+      const flowStatusMap: Record<number, 'pendiente' | 'aprobado' | 'rechazado' | 'cancelado'> = {
+        1: 'pendiente',
+        2: 'aprobado',
+        3: 'rechazado',
+        4: 'cancelado',
+      };
+      const mappedStatus = flowStatusMap[paymentStatus] || 'error';
+
+      // Initialize pago if not exists
+      if (!order.pago) {
+        order.pago = {
+          estado: mappedStatus,
+          montoTotal: order.total,
+          montoPagado: 0,
+          intentos: [],
+        };
+      }
+
+      // Find existing flow attempt or update the last one
+      const existingAttempt = order.pago.intentos.find(
+        (a) => a.provider === 'flow' && a.flowToken === paymentData?.token
+      );
+
+      if (existingAttempt) {
+        existingAttempt.estado = mappedStatus;
+        existingAttempt.raw = paymentData;
+        if (paymentData?.paymentData) {
+          existingAttempt.mensaje = `${paymentData.paymentData.media || 'Flow.cl'} - ${paymentData.statusStr || mappedStatus}`;
+        }
+      } else {
+        // Create new attempt from webhook data
+        order.pago.intentos.push({
+          transactionId: paymentData?.flowOrder?.toString() || paymentData?.token || `flow_${Date.now()}`,
+          provider: 'flow',
+          monto: paymentData?.amount || order.total,
+          metodo: 'flow',
+          estado: mappedStatus,
+          mensaje: paymentData?.statusStr || mappedStatus,
+          fecha: new Date(),
+          raw: paymentData,
+          flowToken: paymentData?.token,
+          flowOrderNumber: paymentData?.flowOrder,
+        });
+      }
+
+      // Update overall payment status
+      order.pago.estado = mappedStatus;
+
+      if (mappedStatus === 'aprobado') {
+        order.pago.montoPagado = paymentData?.amount || order.total;
+
+        order.historialEstados.push({
+          estado: 'pago_aprobado',
+          fecha: new Date(),
+          observacion: `Pago aprobado vía Flow.cl - ${paymentData?.paymentData?.media || 'Pago electrónico'} - Orden Flow #${paymentData?.flowOrder || ''}`,
+        });
+
+        // Create finance transaction
+        await FinanceTransaction.create({
+          tipo: 'ingreso',
+          monto: paymentData?.amount || order.total,
+          descripcion: `Pago Flow.cl - Pedido ${order.numeroPedido}`,
+          categoria: 'pago_pedido',
+          fecha: new Date(),
+          referencia: { tipo: 'orden', id: order._id },
+          comprobante: `flow:${paymentData?.flowOrder || paymentData?.token || ''}`,
+          usuario: order.aprobadoPor || order.paciente,
+        });
+      } else if (mappedStatus === 'rechazado') {
+        order.historialEstados.push({
+          estado: 'pago_rechazado',
+          fecha: new Date(),
+          observacion: `Pago rechazado vía Flow.cl - ${paymentData?.statusStr || 'Rechazado'}`,
+        });
+      } else if (mappedStatus === 'cancelado') {
+        order.historialEstados.push({
+          estado: 'pago_cancelado',
+          fecha: new Date(),
+          observacion: `Pago cancelado/anulado vía Flow.cl`,
+        });
+      }
+
+      await order.save();
+      res.json({ received: true, orderId: order._id, status: mappedStatus });
+    } catch (error) {
+      console.error('Flow webhook error:', error);
+      res.status(500).json({ message: 'Error procesando webhook de Flow.' });
     }
   }
 );

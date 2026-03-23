@@ -1,6 +1,7 @@
 import { Router, Response } from 'express';
 import { body, query, validationResult } from 'express-validator';
 import { Patient } from '../models/Patient';
+import { ensurePatientProfileForUser } from '../services/ensurePatientProfile';
 import { authenticate, authorize, AuthRequest } from '../middleware/auth';
 import { auditLog } from '../middleware/audit';
 import { upload } from '../middleware/upload';
@@ -65,9 +66,12 @@ router.get(
   authorize('paciente'),
   async (req: AuthRequest, res: Response): Promise<void> => {
     try {
-      const patient = await Patient.findOne({ usuario: req.user!._id });
+      const patient = await ensurePatientProfileForUser(req.user!);
       if (!patient) {
-        res.status(404).json({ message: 'Perfil de paciente no encontrado.' });
+        res.status(409).json({
+          message:
+            'No se pudo vincular tu cuenta con un perfil de paciente. Si ya existe una ficha con tu RUT en el sistema, contacta al dispensario.',
+        });
         return;
       }
       res.json(patient);
@@ -91,11 +95,18 @@ router.put(
       if (req.body.direccion !== undefined) update.direccion = req.body.direccion;
       if (req.body.medicoTratante !== undefined) update.medicoTratante = req.body.medicoTratante;
 
-      const patient = await Patient.findOneAndUpdate(
-        { usuario: req.user!._id },
-        update,
-        { new: true, runValidators: true }
-      );
+      const existing = await ensurePatientProfileForUser(req.user!);
+      if (!existing) {
+        res.status(409).json({
+          message:
+            'No se pudo vincular tu cuenta con un perfil de paciente. Si ya existe una ficha con tu RUT en el sistema, contacta al dispensario.',
+        });
+        return;
+      }
+      const patient = await Patient.findByIdAndUpdate(existing._id, update, {
+        new: true,
+        runValidators: true,
+      });
       if (!patient) {
         res.status(404).json({ message: 'Perfil de paciente no encontrado.' });
         return;
@@ -129,9 +140,12 @@ router.post(
     }
 
     try {
-      const patient = await Patient.findOne({ usuario: req.user!._id });
+      const patient = await ensurePatientProfileForUser(req.user!);
       if (!patient) {
-        res.status(404).json({ message: 'Perfil de paciente no encontrado.' });
+        res.status(409).json({
+          message:
+            'No se pudo vincular tu cuenta con un perfil de paciente. Si ya existe una ficha con tu RUT en el sistema, contacta al dispensario.',
+        });
         return;
       }
 

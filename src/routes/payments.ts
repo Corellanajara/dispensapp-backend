@@ -1,10 +1,13 @@
 import { Router, Response } from 'express';
 import { body, validationResult } from 'express-validator';
+import axios from 'axios';
 import { Order } from '../models/Order';
 import { FinanceTransaction } from '../models/Finance';
+import { Patient } from '../models/Patient';
 import { authenticate, authorize, AuthRequest } from '../middleware/auth';
 import { auditLog } from '../middleware/audit';
 import { getProvider, listProviders } from '../services/payment';
+import { env } from '../config/env';
 
 const router = Router();
 
@@ -283,6 +286,380 @@ router.post(
     } catch (error) {
       console.error('Payment callback error:', error);
       res.status(500).json({ message: 'Error procesando callback.' });
+    }
+  }
+);
+
+// POST /api/payments/orders/:orderId/create-flow
+router.post(
+  '/orders/:orderId/create-flow',
+  authenticate,
+  authorize('admin', 'operador'),
+  auditLog('crear_pago_flow', 'pedido'),
+  async (req: AuthRequest, res: Response): Promise<void> => {
+    try {
+      const order = await Order.findById(req.params.orderId).populate('paciente', 'nombre apellido rut email');
+      if (!order) {
+        res.status(404).json({ message: 'Pedido no encontrado.' });
+        return;
+      }
+
+      if (!['aprobado', 'en_preparacion', 'listo_retiro'].includes(order.estado)) {
+        res.status(400).json({
+          message: `No se puede crear pago para un pedido en estado "${order.estado}".`,
+        });
+        return;
+      }
+
+      if (order.pago?.estado === 'aprobado') {
+        res.status(400).json({ message: 'Este pedido ya tiene un pago aprobado.' });
+        return;
+      }
+
+      const patient = order.paciente as any;
+      const paymentMethod = req.body.paymentMethod || 9;
+
+      const flowResponse = await axios.post(`${env.FLOW_SERVICE_URL}/apiFlow/create_order`, {
+        orderId: order._id.toString(),
+        subject: `Pago Pedido #${order.numeroPedido} - Dispensario`,
+        currency: 'CLP',
+        amount: order.total,
+        email: patient.email,
+        paymentMethod,
+        rut: patient.rut,
+        serviceId: order._id.toString(),
+      });
+      console.log('flowResponse', flowResponse.data);
+      const { redirect } = flowResponse.data;
+      if (!redirect) {
+        res.status(502).json({ message: 'Error al crear pago en Flow.cl', detail: flowResponse.data });
+        return;
+      }
+
+      const urlObj = new URL(redirect);
+      const flowToken = urlObj.searchParams.get('token') || '';
+
+      if (!order.pago) {
+        order.pago = {
+          estado: 'pendiente',
+          montoTotal: order.total,
+          montoPagado: 0,
+          intentos: [],
+        };
+      } else {
+        order.pago.estado = 'pendiente';
+      }
+
+      order.pago.intentos.push({
+        transactionId: `flow_${Date.now()}`,
+        provider: 'flow',
+        monto: order.total,
+        metodo: 'flow',
+        estado: 'pendiente',
+        mensaje: 'Link de pago generado vía Flow.cl',
+        fecha: new Date(),
+        flowToken,
+        redirectUrl: redirect,
+      });
+
+      order.historialEstados.push({
+        estado: 'pago_pendiente',
+        fecha: new Date(),
+        usuario: req.user!._id,
+        observacion: `Pago Flow.cl creado por ${req.user!.nombre || 'operador'}`,
+      });
+
+      await order.save();
+      res.json({ order, redirectUrl: redirect, flowToken });
+    } catch (error) {
+      console.error('Create flow payment error:', error);
+      res.status(500).json({ message: 'Error al crear pago Flow.cl.' });
+    }
+  }
+);
+
+// POST /api/payments/orders/:orderId/send-payment-email
+router.post(
+  '/orders/:orderId/send-payment-email',
+  authenticate,
+  authorize('admin', 'operador'),
+  auditLog('enviar_pago_email', 'pedido'),
+  async (req: AuthRequest, res: Response): Promise<void> => {
+    try {
+      const order = await Order.findById(req.params.orderId).populate('paciente', 'nombre apellido rut email');
+      if (!order) {
+        res.status(404).json({ message: 'Pedido no encontrado.' });
+        return;
+      }
+
+      if (!['aprobado', 'en_preparacion', 'listo_retiro'].includes(order.estado)) {
+        res.status(400).json({
+          message: `No se puede enviar pago para un pedido en estado "${order.estado}".`,
+        });
+        return;
+      }
+
+      if (order.pago?.estado === 'aprobado') {
+        res.status(400).json({ message: 'Este pedido ya tiene un pago aprobado.' });
+        return;
+      }
+
+      const patient = order.paciente as any;
+      const email = req.body.email || patient.email;
+      const subject = req.body.subject || `Pago Pedido #${order.numeroPedido} - Dispensario`;
+
+      if (!email) {
+        res.status(400).json({ message: 'Email del paciente es requerido.' });
+        return;
+      }
+
+      const flowResponse = await axios.post(`${env.FLOW_SERVICE_URL}/apiFlow/create_email`, {
+        email,
+        subject,
+        amount: order.total,
+        orderId: order._id.toString(),
+      });
+
+      const flowData = flowResponse.data?.response || flowResponse.data;
+
+      if (!order.pago) {
+        order.pago = {
+          estado: 'pendiente',
+          montoTotal: order.total,
+          montoPagado: 0,
+          intentos: [],
+        };
+      } else {
+        order.pago.estado = 'pendiente';
+      }
+
+      order.pago.intentos.push({
+        transactionId: `flow_email_${Date.now()}`,
+        provider: 'flow',
+        monto: order.total,
+        metodo: 'flow',
+        estado: 'pendiente',
+        mensaje: `Link de pago enviado por email a ${email}`,
+        fecha: new Date(),
+        flowToken: flowData?.token,
+        flowOrderNumber: flowData?.flowOrder,
+        raw: flowData,
+      });
+
+      order.historialEstados.push({
+        estado: 'pago_pendiente',
+        fecha: new Date(),
+        usuario: req.user!._id,
+        observacion: `Link de pago enviado por email a ${email} vía Flow.cl`,
+      });
+
+      await order.save();
+      res.json({ order, emailSent: true, email, flowResponse: flowData });
+    } catch (error) {
+      console.error('Send payment email error:', error);
+      res.status(500).json({ message: 'Error al enviar pago por email.' });
+    }
+  }
+);
+
+// GET /api/payments/orders/:orderId/flow-status
+router.get(
+  '/orders/:orderId/flow-status',
+  authenticate,
+  async (req: AuthRequest, res: Response): Promise<void> => {
+    try {
+      const order = await Order.findById(req.params.orderId);
+      if (!order) {
+        res.status(404).json({ message: 'Pedido no encontrado.' });
+        return;
+      }
+
+      if (!order.pago || order.pago.intentos.length === 0) {
+        res.json({ status: 'sin_pago', message: 'No hay pagos registrados para este pedido.' });
+        return;
+      }
+
+      const flowAttempts = order.pago.intentos.filter((a) => a.provider === 'flow');
+      const lastFlowAttempt = flowAttempts[flowAttempts.length - 1];
+
+      if (!lastFlowAttempt) {
+        res.json({ status: 'sin_pago_flow', message: 'No hay pagos Flow.cl registrados.' });
+        return;
+      }
+
+      if (['aprobado', 'rechazado', 'cancelado'].includes(lastFlowAttempt.estado)) {
+        res.json({ pago: order.pago, ultimoIntento: lastFlowAttempt });
+        return;
+      }
+
+      if (lastFlowAttempt.flowToken) {
+        try {
+          const flowResponse = await axios.post(
+            `${env.FLOW_SERVICE_URL}/getPayment?token=${lastFlowAttempt.flowToken}`
+          );
+          const flowData = flowResponse.data;
+
+          const flowStatusMap: Record<number, 'pendiente' | 'aprobado' | 'rechazado' | 'cancelado'> = {
+            1: 'pendiente',
+            2: 'aprobado',
+            3: 'rechazado',
+            4: 'cancelado',
+          };
+          const newStatus = flowStatusMap[flowData?.status] || lastFlowAttempt.estado;
+
+          if (newStatus !== lastFlowAttempt.estado) {
+            lastFlowAttempt.estado = newStatus;
+            lastFlowAttempt.raw = flowData;
+            order.pago.estado = newStatus;
+
+            if (newStatus === 'aprobado') {
+              order.pago.montoPagado = flowData?.amount || lastFlowAttempt.monto;
+              order.historialEstados.push({
+                estado: 'pago_aprobado',
+                fecha: new Date(),
+                observacion: `Pago aprobado vía Flow.cl (consulta manual)`,
+              });
+
+              await FinanceTransaction.create({
+                tipo: 'ingreso',
+                monto: flowData?.amount || order.total,
+                descripcion: `Pago Flow.cl - Pedido ${order.numeroPedido}`,
+                categoria: 'pago_pedido',
+                fecha: new Date(),
+                referencia: { tipo: 'orden', id: order._id },
+                comprobante: `flow:${flowData?.flowOrder || lastFlowAttempt.flowToken}`,
+                usuario: order.aprobadoPor || order.paciente,
+              });
+            } else if (newStatus === 'rechazado') {
+              order.historialEstados.push({
+                estado: 'pago_rechazado',
+                fecha: new Date(),
+                observacion: `Pago rechazado vía Flow.cl`,
+              });
+            } else if (newStatus === 'cancelado') {
+              order.historialEstados.push({
+                estado: 'pago_cancelado',
+                fecha: new Date(),
+                observacion: `Pago cancelado vía Flow.cl`,
+              });
+            }
+
+            await order.save();
+          }
+
+          res.json({ pago: order.pago, ultimoIntento: lastFlowAttempt, flowStatus: flowData });
+        } catch (flowError) {
+          console.error('Flow status query error:', flowError);
+          res.json({
+            pago: order.pago,
+            ultimoIntento: lastFlowAttempt,
+            flowError: 'No se pudo consultar el estado en Flow.cl',
+          });
+        }
+      } else {
+        res.json({ pago: order.pago, ultimoIntento: lastFlowAttempt });
+      }
+    } catch (error) {
+      console.error('Get flow status error:', error);
+      res.status(500).json({ message: 'Error al consultar estado del pago.' });
+    }
+  }
+);
+
+// POST /api/payments/orders/:orderId/patient-pay — Patient self-initiates Flow.cl payment
+router.post(
+  '/orders/:orderId/patient-pay',
+  authenticate,
+  authorize('paciente'),
+  async (req: AuthRequest, res: Response): Promise<void> => {
+    try {
+      const order = await Order.findById(req.params.orderId).populate('paciente', 'nombre apellido rut email usuario');
+      if (!order) {
+        res.status(404).json({ message: 'Pedido no encontrado.' });
+        return;
+      }
+
+      const patient = order.paciente as any;
+      if (!patient || patient.usuario?.toString() !== req.user!._id.toString()) {
+        res.status(403).json({ message: 'No tienes permiso para pagar este pedido.' });
+        return;
+      }
+
+      if (['cancelado', 'entregado'].includes(order.estado)) {
+        res.status(400).json({ message: `No se puede pagar un pedido en estado "${order.estado}".` });
+        return;
+      }
+
+      if (order.pago?.estado === 'aprobado') {
+        res.status(400).json({ message: 'Este pedido ya fue pagado.' });
+        return;
+      }
+
+      // If there's already a pending flow attempt with redirectUrl, return it
+      const existingFlowAttempt = order.pago?.intentos
+        ?.filter((a) => a.provider === 'flow' && a.estado === 'pendiente' && a.redirectUrl)
+        .slice(-1)[0];
+
+      if (existingFlowAttempt?.redirectUrl) {
+        res.json({ order, redirectUrl: existingFlowAttempt.redirectUrl, flowToken: existingFlowAttempt.flowToken });
+        return;
+      }
+
+      const flowResponse = await axios.post(`${env.FLOW_SERVICE_URL}/apiFlow/create_order`, {
+        orderId: order._id.toString(),
+        subject: `Pago Pedido #${order.numeroPedido} - Dispensario`,
+        currency: 'CLP',
+        amount: order.total,
+        email: 'corellanajara@hotmail.com',//patient.email,
+        paymentMethod: 9,
+        rut: patient.rut,
+        serviceId: order._id.toString(),
+      });
+
+      const { redirect } = flowResponse.data;
+      if (!redirect) {
+        res.status(502).json({ message: 'Error al crear pago en Flow.cl' , reason: flowResponse.data?.error});
+        return;
+      }
+
+      const urlObj = new URL(redirect);
+      const flowToken = urlObj.searchParams.get('token') || '';
+
+      if (!order.pago) {
+        order.pago = {
+          estado: 'pendiente',
+          montoTotal: order.total,
+          montoPagado: 0,
+          intentos: [],
+        };
+      } else {
+        order.pago.estado = 'pendiente';
+      }
+
+      order.pago.intentos.push({
+        transactionId: `flow_patient_${Date.now()}`,
+        provider: 'flow',
+        monto: order.total,
+        metodo: 'flow',
+        estado: 'pendiente',
+        mensaje: 'Pago iniciado por paciente',
+        fecha: new Date(),
+        flowToken,
+        redirectUrl: redirect,
+      });
+
+      order.historialEstados.push({
+        estado: 'pago_pendiente',
+        fecha: new Date(),
+        usuario: req.user!._id,
+        observacion: 'Pago Flow.cl iniciado por paciente',
+      });
+
+      await order.save();
+      res.json({ order, redirectUrl: redirect, flowToken });
+    } catch (error) {
+      console.error('Patient pay error:', error);
+      res.status(500).json({ message: 'Error al iniciar pago.' });
     }
   }
 );

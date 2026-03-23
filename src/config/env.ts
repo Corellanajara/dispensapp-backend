@@ -20,4 +20,8 @@ export const env = {
 
   // Proveedor firma electrónica (default 'mock' para desarrollo)
   SIGNATURE_PROVIDER: process.env.SIGNATURE_PROVIDER || 'mock',
+
+  // Flow.cl payment gateway
+  FLOW_SERVICE_URL: process.env.FLOW_SERVICE_URL || 'http://localhost:3800',
+  FRONTEND_URL: process.env.FRONTEND_URL || 'http://localhost:5173',
 };

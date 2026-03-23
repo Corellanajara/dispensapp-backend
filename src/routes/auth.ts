@@ -1,7 +1,7 @@
 import { Router, Response } from 'express';
 import jwt from 'jsonwebtoken';
 import { body, validationResult } from 'express-validator';
-import { User } from '../models/User';
+import { User, UserRole } from '../models/User';
 import { Patient } from '../models/Patient';
 import { env } from '../config/env';
 import { authenticate, AuthRequest } from '../middleware/auth';
@@ -34,6 +34,15 @@ router.post(
     try {
       const { email, password, nombre, apellido, rut, role, telefono } = req.body;
 
+      const resolvedRole = (role || 'operador') as UserRole;
+      if (resolvedRole === 'paciente') {
+        res.status(400).json({
+          message:
+            'No se puede crear un paciente desde aquí. Usa el registro de pacientes o el enlace de registro del portal; allí se crea la cuenta y la ficha clínica vinculadas.',
+        });
+        return;
+      }
+
       const existingUser = await User.findOne({ $or: [{ email }, { rut }] });
       if (existingUser) {
         res.status(400).json({ message: 'El email o RUT ya está registrado.' });
@@ -46,7 +55,7 @@ router.post(
         nombre,
         apellido,
         rut,
-        role: role || 'operador',
+        role: resolvedRole,
         telefono,
       });
 
