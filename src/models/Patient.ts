@@ -1,19 +1,37 @@
 import mongoose, { Schema, Document, Types } from 'mongoose';
+import { DOCUMENT_TYPES, DocumentType } from '../config/documentos';
+import { documentSignatureSchema, IDocumentSignature } from './shared';
 
 export type PatientStatus = 'pendiente' | 'aprobado' | 'rechazado' | 'suspendido';
+export type SuspensionReason = 'receta_vencida' | 'manual';
 
 export interface IDocument {
-  tipo: 'receta_medica' | 'certificado_antecedentes' | 'cedula_identidad' | 'otro';
+  _id: Types.ObjectId;
+  tipo: DocumentType;
   nombre: string;
   archivo: string;
   fechaSubida: Date;
+  subidoPor?: Types.ObjectId;
   fechaVencimiento?: Date;
   estado: 'pendiente' | 'aprobado' | 'rechazado';
   observaciones?: string;
+  revisadoPor?: Types.ObjectId;
+  fechaRevision?: Date;
+  firma?: IDocumentSignature;
+}
+
+export interface IPatientStatusChange {
+  estado: PatientStatus;
+  fecha: Date;
+  /** Vacío cuando el cambio lo hizo el sistema (ej. receta vencida). */
+  usuario?: Types.ObjectId;
+  motivo?: string;
 }
 
 export interface IPatient extends Document {
   usuario: Types.ObjectId;
+  /** Dispensario al que pertenece. Vacío solo en fichas antiguas, pendientes de asignar. */
+  sucursal?: Types.ObjectId;
   rut: string;
   nombre: string;
   apellido: string;
@@ -34,9 +52,16 @@ export interface IPatient extends Document {
     telefono?: string;
     email?: string;
   };
-  documentos: IDocument[];
+  documentos: Types.DocumentArray<IDocument & Types.Subdocument>;
   estado: PatientStatus;
-  limiteCompra: number;
+  motivoSuspension?: SuspensionReason;
+  activadoPor?: Types.ObjectId;
+  fechaActivacion?: Date;
+  historialEstados: IPatientStatusChange[];
+  /** Unidades de producto que puede retirar en 30 días. 0 = sin límite. */
+  limiteMensualUnidades: number;
+  /** @deprecated Límite en pesos del modelo de venta. Ya no se usa. */
+  limiteCompra?: number;
   observaciones?: string;
   createdAt: Date;
   updatedAt: Date;
@@ -46,12 +71,13 @@ const documentSchema = new Schema<IDocument>(
   {
     tipo: {
       type: String,
-      enum: ['receta_medica', 'certificado_antecedentes', 'cedula_identidad', 'otro'],
+      enum: DOCUMENT_TYPES,
       required: true,
     },
     nombre: { type: String, required: true },
     archivo: { type: String, required: true },
     fechaSubida: { type: Date, default: Date.now },
+    subidoPor: { type: Schema.Types.ObjectId, ref: 'User' },
     fechaVencimiento: { type: Date },
     estado: {
       type: String,
@@ -59,8 +85,21 @@ const documentSchema = new Schema<IDocument>(
       default: 'pendiente',
     },
     observaciones: { type: String },
+    revisadoPor: { type: Schema.Types.ObjectId, ref: 'User' },
+    fechaRevision: { type: Date },
+    firma: documentSignatureSchema,
   },
   { _id: true }
+);
+
+const statusChangeSchema = new Schema<IPatientStatusChange>(
+  {
+    estado: { type: String, required: true },
+    fecha: { type: Date, default: Date.now },
+    usuario: { type: Schema.Types.ObjectId, ref: 'User' },
+    motivo: { type: String },
+  },
+  { _id: false }
 );
 
 const patientSchema = new Schema<IPatient>(
@@ -68,6 +107,10 @@ const patientSchema = new Schema<IPatient>(
     usuario: {
       type: Schema.Types.ObjectId,
       ref: 'User',
+    },
+    sucursal: {
+      type: Schema.Types.ObjectId,
+      ref: 'Sucursal',
     },
     rut: {
       type: String,
@@ -118,10 +161,19 @@ const patientSchema = new Schema<IPatient>(
       enum: ['pendiente', 'aprobado', 'rechazado', 'suspendido'],
       default: 'pendiente',
     },
-    limiteCompra: {
+    motivoSuspension: {
+      type: String,
+      enum: ['receta_vencida', 'manual'],
+    },
+    activadoPor: { type: Schema.Types.ObjectId, ref: 'User' },
+    fechaActivacion: { type: Date },
+    historialEstados: [statusChangeSchema],
+    limiteMensualUnidades: {
       type: Number,
       default: 0,
+      min: 0,
     },
+    limiteCompra: { type: Number },
     observaciones: { type: String },
   },
   {
@@ -131,6 +183,9 @@ const patientSchema = new Schema<IPatient>(
 
 // rut index already created by unique: true
 patientSchema.index({ estado: 1 });
+patientSchema.index({ sucursal: 1, estado: 1 });
 patientSchema.index({ 'medicoTratante.nombre': 1 });
+patientSchema.index({ 'documentos.tipo': 1, 'documentos.fechaVencimiento': 1 });
+patientSchema.index({ 'documentos.firma.signatureId': 1 });
 
 export const Patient = mongoose.model<IPatient>('Patient', patientSchema);

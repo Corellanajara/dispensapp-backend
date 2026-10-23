@@ -17,9 +17,14 @@ export interface IWaste {
 }
 
 export interface IProduction extends Document {
+  sucursal: Types.ObjectId;
   codigoProduccion: string;
   productoFinal: Types.ObjectId;
   lote: string;
+  /** Cosecha de la que proviene la materia prima, si aplica. */
+  cosecha?: Types.ObjectId;
+  /** Ubicación donde queda el producto terminado. */
+  ubicacionDestino?: Types.ObjectId;
   materiasPrimas: IRawMaterial[];
   cantidadInicial: number;
   cantidadProducida: number;
@@ -60,6 +65,11 @@ const wasteSchema = new Schema<IWaste>(
 
 const productionSchema = new Schema<IProduction>(
   {
+    sucursal: {
+      type: Schema.Types.ObjectId,
+      ref: 'Sucursal',
+      required: true,
+    },
     codigoProduccion: {
       type: String,
       required: true,
@@ -73,6 +83,14 @@ const productionSchema = new Schema<IProduction>(
     lote: {
       type: String,
       required: true,
+    },
+    cosecha: {
+      type: Schema.Types.ObjectId,
+      ref: 'Cosecha',
+    },
+    ubicacionDestino: {
+      type: Schema.Types.ObjectId,
+      ref: 'Ubicacion',
     },
     materiasPrimas: {
       type: [rawMaterialSchema],
@@ -117,6 +135,7 @@ const productionSchema = new Schema<IProduction>(
 );
 
 // codigoProduccion index already created by unique: true
+productionSchema.index({ sucursal: 1, estado: 1, createdAt: -1 });
 productionSchema.index({ lote: 1 });
 productionSchema.index({ estado: 1 });
 productionSchema.index({ responsable: 1 });

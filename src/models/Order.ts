@@ -1,4 +1,5 @@
 import mongoose, { Schema, Document, Types } from 'mongoose';
+import { documentSignatureSchema } from './shared';
 
 export type OrderStatus =
   | 'pendiente_revision'
@@ -29,12 +30,23 @@ export type SignatureStatus =
 
 // ─── Sub-documentos ────────────────────────────────────────
 
+/** Lote y fila de stock desde donde se descontó un ítem (trazabilidad paciente → lote). */
+export interface IOrderItemAllocation {
+  stock: Types.ObjectId;
+  lote: string;
+  cantidad: number;
+  ubicacion?: Types.ObjectId;
+  cosecha?: Types.ObjectId;
+}
+
 export interface IOrderItem {
   producto: Types.ObjectId;
   nombre: string;
   cantidad: number;
+  /** Solo se usa si PAGOS_HABILITADOS=true. Si no, queda en 0. */
   precioUnitario: number;
   subtotal: number;
+  lotes: IOrderItemAllocation[];
 }
 
 export interface IPaymentAttempt {
@@ -85,11 +97,15 @@ export interface IOrderDocument {
 
 export interface IOrder extends Document {
   numeroPedido: string;
+  sucursal: Types.ObjectId;
   paciente: Types.ObjectId;
   items: IOrderItem[];
   total: number;
   estado: OrderStatus;
+  /** Texto descriptivo de la receta (nombre del documento). */
   recetaMedica: string;
+  /** Documento de receta del paciente vigente al crear la nota. */
+  receta?: Types.ObjectId;
   tipoEntrega: DeliveryType;
   direccionEntrega?: {
     calle: string;
@@ -117,13 +133,25 @@ export interface IOrder extends Document {
 
 // ─── Schemas ───────────────────────────────────────────────
 
+const allocationSchema = new Schema<IOrderItemAllocation>(
+  {
+    stock: { type: Schema.Types.ObjectId, ref: 'SucursalStock', required: true },
+    lote: { type: String, required: true },
+    cantidad: { type: Number, required: true, min: 0 },
+    ubicacion: { type: Schema.Types.ObjectId, ref: 'Ubicacion' },
+    cosecha: { type: Schema.Types.ObjectId, ref: 'Cosecha' },
+  },
+  { _id: false }
+);
+
 const orderItemSchema = new Schema<IOrderItem>(
   {
     producto: { type: Schema.Types.ObjectId, ref: 'Product', required: true },
     nombre: { type: String, required: true },
     cantidad: { type: Number, required: true, min: 1 },
-    precioUnitario: { type: Number, required: true, min: 0 },
-    subtotal: { type: Number, required: true, min: 0 },
+    precioUnitario: { type: Number, default: 0, min: 0 },
+    subtotal: { type: Number, default: 0, min: 0 },
+    lotes: { type: [allocationSchema], default: [] },
   },
   { _id: false }
 );
@@ -166,24 +194,6 @@ const orderPaymentSchema = new Schema(
   { _id: false }
 );
 
-const documentSignatureSchema = new Schema(
-  {
-    signatureId: { type: String, required: true },
-    provider: { type: String, required: true },
-    estado: {
-      type: String,
-      enum: ['pendiente', 'enviado', 'firmado', 'rechazado', 'expirado', 'error'],
-      default: 'pendiente',
-    },
-    signingUrl: { type: String },
-    firmadoPor: { type: String },
-    rutFirmante: { type: String },
-    fechaFirma: { type: Date },
-    archivoFirmado: { type: String },
-  },
-  { _id: false }
-);
-
 const orderDocumentSchema = new Schema(
   {
     tipo: { type: String, required: true },
@@ -202,6 +212,11 @@ const orderSchema = new Schema<IOrder>(
       type: String,
       required: true,
       unique: true,
+    },
+    sucursal: {
+      type: Schema.Types.ObjectId,
+      ref: 'Sucursal',
+      required: true,
     },
     paciente: {
       type: Schema.Types.ObjectId,
@@ -238,6 +253,9 @@ const orderSchema = new Schema<IOrder>(
       type: String,
       required: true,
     },
+    receta: {
+      type: Schema.Types.ObjectId,
+    },
     tipoEntrega: {
       type: String,
       enum: ['retiro', 'despacho'],
@@ -272,8 +290,10 @@ const orderSchema = new Schema<IOrder>(
 );
 
 // numeroPedido index already created by unique: true
+orderSchema.index({ sucursal: 1, estado: 1, createdAt: -1 });
 orderSchema.index({ paciente: 1 });
 orderSchema.index({ estado: 1 });
 orderSchema.index({ createdAt: -1 });
+orderSchema.index({ 'items.lotes.lote': 1 });
 
 export const Order = mongoose.model<IOrder>('Order', orderSchema);

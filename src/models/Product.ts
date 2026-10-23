@@ -39,9 +39,10 @@ const productSchema = new Schema<IProduct>(
     concentracion: { type: String },
     presentacion: { type: String },
     usoTerapeutico: { type: String },
+    // Precio referencial. Solo se usa si PAGOS_HABILITADOS=true.
     precio: {
       type: Number,
-      required: true,
+      default: 0,
       min: 0,
     },
     lote: {

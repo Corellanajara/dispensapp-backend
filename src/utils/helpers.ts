@@ -1,4 +1,5 @@
 import { v4 as uuidv4 } from 'uuid';
+import crypto from 'crypto';
 
 export const generateOrderNumber = (): string => {
   const date = new Date();
@@ -8,7 +9,8 @@ export const generateOrderNumber = (): string => {
   const random = Math.floor(Math.random() * 10000)
     .toString()
     .padStart(4, '0');
-  return `PED-${year}${month}${day}-${random}`;
+  // ND = nota de dispensación (antes PED = pedido)
+  return `ND-${year}${month}${day}-${random}`;
 };
 
 export const generateProductionCode = (): string => {
@@ -28,6 +30,18 @@ export const generateLotCode = (): string => {
   const short = uuidv4().slice(0, 8).toUpperCase();
   return `LOT-${year}${month}-${short}`;
 };
+
+/** Código legible con prefijo, ej. ESP-2610-4F9A2C1B */
+export const generateCode = (prefix: string): string => {
+  const date = new Date();
+  const year = date.getFullYear().toString().slice(-2);
+  const month = (date.getMonth() + 1).toString().padStart(2, '0');
+  const short = uuidv4().replace(/-/g, '').slice(0, 8).toUpperCase();
+  return `${prefix}-${year}${month}-${short}`;
+};
+
+/** Token aleatorio para códigos QR (no adivinable, no contiene datos del paciente). */
+export const generateQRToken = (): string => crypto.randomBytes(12).toString('base64url');
 
 export const formatCurrency = (amount: number): string => {
   return new Intl.NumberFormat('es-CL', {

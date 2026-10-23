@@ -1,31 +1,162 @@
 import { Router, Response } from 'express';
 import { body, validationResult } from 'express-validator';
-import mongoose from 'mongoose';
+import mongoose, { Types } from 'mongoose';
 import { Order, IOrderDocument } from '../models/Order';
+import { Patient, IDocument } from '../models/Patient';
 import { authenticate, authorize, AuthRequest } from '../middleware/auth';
+import { canAccessSucursal } from '../middleware/sucursal';
 import { auditLog } from '../middleware/audit';
 import { upload } from '../middleware/upload';
-import { uploadFile } from '../services/storage';
+import { uploadFile, getDownloadUrl } from '../services/storage';
+import { registrarAuditoria } from '../services/audit';
 import { getProvider, listProviders } from '../services/signature';
+import { solicitarFirmaDocumento, actualizarEstadoFirma, FirmaError } from '../services/firmas';
+import { env } from '../config/env';
 
+/**
+ * Firma electrónica de documentos del paciente (reglamento interno y mandato o contrato)
+ * y adjuntos de las notas de dispensación.
+ */
 const router = Router();
 
+function baseUrl(req: AuthRequest): string {
+  return `${req.protocol}://${req.get('host')}`;
+}
+
 // GET /api/signatures/providers — lista proveedores registrados
-router.get(
-  '/providers',
+router.get('/providers', authenticate, authorize('admin', 'operador'), (_req: AuthRequest, res: Response): void => {
+  res.json({ providers: listProviders(), activo: env.SIGNATURE_PROVIDER });
+});
+
+// ─── Documentos del paciente ───────────────────────────────
+
+async function cargarDocumentoPaciente(req: AuthRequest, res: Response) {
+  const { patientId, docId } = req.params as Record<string, string>;
+  if (!mongoose.Types.ObjectId.isValid(patientId) || !mongoose.Types.ObjectId.isValid(docId)) {
+    res.status(400).json({ message: 'ID inválido.' });
+    return null;
+  }
+  const patient = await Patient.findById(patientId);
+  if (!patient) {
+    res.status(404).json({ message: 'Paciente no encontrado.' });
+    return null;
+  }
+  if (patient.sucursal && !canAccessSucursal(req.user, patient.sucursal)) {
+    res.status(403).json({ message: 'No tiene acceso a pacientes de esta sucursal.' });
+    return null;
+  }
+  const doc = patient.documentos.id(docId) as IDocument | null;
+  if (!doc) {
+    res.status(404).json({ message: 'Documento no encontrado.' });
+    return null;
+  }
+  return { patient, doc };
+}
+
+// POST /api/signatures/patients/:patientId/documents/:docId/sign — enviar documento a firma del paciente
+router.post(
+  '/patients/:patientId/documents/:docId/sign',
   authenticate,
-  (_req: AuthRequest, res: Response): void => {
-    res.json({ providers: listProviders() });
+  authorize('admin', 'operador'),
+  [
+    body('signerName').optional().isString(),
+    body('signerEmail').optional().isEmail().withMessage('Email del firmante inválido'),
+    body('signerRut').optional().isString(),
+    body('message').optional().isString(),
+  ],
+  async (req: AuthRequest, res: Response): Promise<void> => {
+    const errors = validationResult(req);
+    if (!errors.isEmpty()) {
+      res.status(400).json({ errors: errors.array() });
+      return;
+    }
+
+    try {
+      const found = await cargarDocumentoPaciente(req, res);
+      if (!found) return;
+      const { patient, doc } = found;
+
+      // Por defecto firma el propio paciente.
+      const result = await solicitarFirmaDocumento(
+        patient,
+        doc,
+        {
+          name: req.body.signerName || `${patient.nombre} ${patient.apellido}`,
+          email: req.body.signerEmail || patient.email,
+          rut: req.body.signerRut || patient.rut,
+        },
+        req.user!._id as Types.ObjectId,
+        req.body.message
+      );
+      await patient.save();
+
+      void registrarAuditoria({
+        req,
+        usuario: req.user!._id as Types.ObjectId,
+        accion: 'solicitar_firma',
+        entidad: 'paciente',
+        entidadId: patient._id as Types.ObjectId,
+        sucursal: patient.sucursal,
+        detalles: { documento: doc._id, tipo: doc.tipo, proveedor: doc.firma?.provider },
+      });
+
+      res.json({ documento: doc, firma: result });
+    } catch (error) {
+      if (error instanceof FirmaError) {
+        res.status(error.status).json({ message: error.message });
+        return;
+      }
+      console.error('Request patient signature error:', error);
+      res.status(500).json({ message: 'Error al solicitar firma.' });
+    }
   }
 );
 
-// POST /api/signatures/orders/:orderId/documents — subir documento al pedido
+// GET /api/signatures/patients/:patientId/documents/:docId/status — estado de la firma
+router.get(
+  '/patients/:patientId/documents/:docId/status',
+  authenticate,
+  authorize('admin', 'operador'),
+  async (req: AuthRequest, res: Response): Promise<void> => {
+    try {
+      const found = await cargarDocumentoPaciente(req, res);
+      if (!found) return;
+      const { patient, doc } = found;
+      if (await actualizarEstadoFirma(doc)) await patient.save();
+      res.json({ documento: doc });
+    } catch (error) {
+      console.error('Get patient signature status error:', error);
+      res.status(500).json({ message: 'Error al consultar estado de firma.' });
+    }
+  }
+);
+
+// ─── Adjuntos de notas de dispensación ─────────────────────
+
+async function cargarNota(req: AuthRequest, res: Response) {
+  if (!mongoose.Types.ObjectId.isValid(String(req.params.orderId))) {
+    res.status(400).json({ message: 'ID inválido.' });
+    return null;
+  }
+  const order = await Order.findById(req.params.orderId);
+  if (!order) {
+    res.status(404).json({ message: 'Nota no encontrada.' });
+    return null;
+  }
+  if (!canAccessSucursal(req.user, order.sucursal)) {
+    res.status(403).json({ message: 'No tiene acceso a esta sucursal.' });
+    return null;
+  }
+  return order;
+}
+
+// POST /api/signatures/orders/:orderId/documents — adjuntar documento a la nota
 router.post(
   '/orders/:orderId/documents',
   authenticate,
   authorize('admin', 'operador'),
-  auditLog('subir_documento', 'pedido'),
   upload.single('archivo'),
+  auditLog('subir_documento', 'pedido'),
   [
     body('tipo').notEmpty().withMessage('Tipo de documento es requerido'),
     body('nombre').notEmpty().withMessage('Nombre del documento es requerido'),
@@ -38,39 +169,34 @@ router.post(
     }
 
     try {
-      const order = await Order.findById(req.params.orderId);
-      if (!order) {
-        res.status(404).json({ message: 'Pedido no encontrado.' });
-        return;
-      }
+      const order = await cargarNota(req, res);
+      if (!order) return;
 
       if (!req.file) {
         res.status(400).json({ message: 'Archivo es requerido.' });
         return;
       }
 
-      const fileUrl = await uploadFile(req.file);
+      const fileRef = await uploadFile(req.file, { privado: true });
 
       order.documentos.push({
         tipo: req.body.tipo,
         nombre: req.body.nombre,
-        archivo: fileUrl,
+        archivo: fileRef,
         fechaSubida: new Date(),
-        subidoPor: req.user!._id,
+        subidoPor: req.user!._id as Types.ObjectId,
       });
 
       order.historialEstados.push({
         estado: 'documento_subido',
         fecha: new Date(),
-        usuario: req.user!._id,
+        usuario: req.user!._id as Types.ObjectId,
         observacion: `Documento "${req.body.nombre}" (${req.body.tipo}) subido`,
       });
 
       await order.save();
 
-      const populatedOrder = await Order.findById(order._id)
-        .populate('paciente', 'nombre apellido rut email');
-
+      const populatedOrder = await Order.findById(order._id).populate('paciente', 'nombre apellido rut email');
       res.status(201).json(populatedOrder);
     } catch (error) {
       console.error('Upload order document error:', error);
@@ -79,18 +205,15 @@ router.post(
   }
 );
 
-// GET /api/signatures/orders/:orderId/documents — listar documentos del pedido
+// GET /api/signatures/orders/:orderId/documents — listar adjuntos de la nota
 router.get(
   '/orders/:orderId/documents',
   authenticate,
+  authorize('admin', 'operador'),
   async (req: AuthRequest, res: Response): Promise<void> => {
     try {
-      const order = await Order.findById(req.params.orderId)
-        .select('documentos numeroPedido');
-      if (!order) {
-        res.status(404).json({ message: 'Pedido no encontrado.' });
-        return;
-      }
+      const order = await cargarNota(req, res);
+      if (!order) return;
       res.json({ documentos: order.documentos, numeroPedido: order.numeroPedido });
     } catch (error) {
       console.error('Get order documents error:', error);
@@ -99,190 +222,92 @@ router.get(
   }
 );
 
-// POST /api/signatures/orders/:orderId/documents/:docId/sign — solicitar firma
-router.post(
-  '/orders/:orderId/documents/:docId/sign',
+// GET /api/signatures/orders/:orderId/documents/:docId/archivo — enlace temporal de descarga
+router.get(
+  '/orders/:orderId/documents/:docId/archivo',
   authenticate,
   authorize('admin', 'operador'),
-  auditLog('solicitar_firma', 'pedido'),
-  [
-    body('signerName').notEmpty().withMessage('Nombre del firmante es requerido'),
-    body('signerEmail').isEmail().withMessage('Email del firmante inválido'),
-    body('signerRut').optional().isString(),
-    body('message').optional().isString(),
-  ],
   async (req: AuthRequest, res: Response): Promise<void> => {
-    const errors = validationResult(req);
-    if (!errors.isEmpty()) {
-      res.status(400).json({ errors: errors.array() });
+    try {
+      const order = await cargarNota(req, res);
+      if (!order) return;
+      const doc = (order.documentos as unknown as mongoose.Types.DocumentArray<IOrderDocument>).id(
+        String(req.params.docId)
+      );
+      if (!doc) {
+        res.status(404).json({ message: 'Documento no encontrado.' });
+        return;
+      }
+      const ref = req.query.firmado === 'true' && doc.firma?.archivoFirmado ? doc.firma.archivoFirmado : doc.archivo;
+      const url = await getDownloadUrl(ref, baseUrl(req));
+      if (!url) {
+        res.status(404).json({ message: 'El archivo no está disponible.' });
+        return;
+      }
+      void registrarAuditoria({
+        req,
+        usuario: req.user!._id as Types.ObjectId,
+        accion: 'ver_documento',
+        entidad: 'pedido',
+        entidadId: order._id as Types.ObjectId,
+        sucursal: order.sucursal,
+        detalles: { documento: doc._id },
+      });
+      res.json({ url });
+    } catch (error) {
+      console.error('Get order document file error:', error);
+      res.status(500).json({ message: 'Error al obtener documento.' });
+    }
+  }
+);
+
+// ─── Webhook del proveedor ─────────────────────────────────
+
+// POST /api/signatures/callback — exige el header X-Callback-Secret = SIGNATURE_CALLBACK_SECRET
+router.post('/callback', async (req: AuthRequest, res: Response): Promise<void> => {
+  try {
+    if (!env.SIGNATURE_CALLBACK_SECRET || req.header('X-Callback-Secret') !== env.SIGNATURE_CALLBACK_SECRET) {
+      void registrarAuditoria({
+        req,
+        accion: 'callback_firma_rechazado',
+        entidad: 'firma',
+        resultado: 'fallo',
+      });
+      res.status(401).json({ message: 'Callback no autorizado.' });
       return;
     }
 
-    try {
-      const order = await Order.findById(req.params.orderId);
-      if (!order) {
-        res.status(404).json({ message: 'Pedido no encontrado.' });
-        return;
-      }
+    const provider = getProvider();
+    const result = await provider.handleCallback(req.body);
 
-      const doc = (order.documentos as unknown as mongoose.Types.DocumentArray<IOrderDocument>).id(req.params.docId as string);
-      if (!doc) {
-        res.status(404).json({ message: 'Documento no encontrado.' });
-        return;
-      }
-
-      // Verificar que no tenga firma activa
-      if (doc.firma && ['enviado', 'firmado'].includes(doc.firma.estado)) {
-        res.status(400).json({
-          message: `El documento ya tiene una firma en estado "${doc.firma.estado}".`,
+    const patient = await Patient.findOne({ 'documentos.firma.signatureId': result.signatureId });
+    if (patient) {
+      const doc = patient.documentos.find((d) => d.firma?.signatureId === result.signatureId);
+      if (doc?.firma) {
+        doc.firma.estado = result.status;
+        if (result.status === 'firmado') {
+          doc.firma.firmadoPor = result.signedBy;
+          doc.firma.rutFirmante = result.signerRut;
+          doc.firma.fechaFirma = result.signedAt;
+          doc.firma.archivoFirmado = result.signedDocumentUrl;
+        }
+        await patient.save();
+        void registrarAuditoria({
+          req,
+          accion: `firma_${result.status}`,
+          entidad: 'paciente',
+          entidadId: patient._id as Types.ObjectId,
+          sucursal: patient.sucursal,
+          detalles: { documento: doc._id, signatureId: result.signatureId },
         });
-        return;
       }
-
-      const provider = getProvider();
-      const result = await provider.requestSignature({
-        documentId: doc._id.toString(),
-        documentName: doc.nombre,
-        documentPath: doc.archivo,
-        signer: {
-          name: req.body.signerName,
-          email: req.body.signerEmail,
-          rut: req.body.signerRut,
-        },
-        reference: order.numeroPedido,
-        message: req.body.message,
-      });
-
-      doc.firma = {
-        signatureId: result.signatureId,
-        provider: provider.name,
-        estado: result.status,
-        signingUrl: result.signingUrl,
-      };
-
-      order.historialEstados.push({
-        estado: 'firma_solicitada',
-        fecha: new Date(),
-        usuario: req.user!._id,
-        observacion: `Firma solicitada para "${doc.nombre}" a ${req.body.signerEmail} vía ${provider.name}`,
-      });
-
-      await order.save();
-      res.json({ order, signature: result });
-    } catch (error) {
-      console.error('Request signature error:', error);
-      res.status(500).json({ message: 'Error al solicitar firma.' });
     }
+
+    res.json({ received: true });
+  } catch (error) {
+    console.error('Signature callback error:', error);
+    res.status(500).json({ message: 'Error procesando callback de firma.' });
   }
-);
-
-// GET /api/signatures/orders/:orderId/documents/:docId/status — estado de firma
-router.get(
-  '/orders/:orderId/documents/:docId/status',
-  authenticate,
-  async (req: AuthRequest, res: Response): Promise<void> => {
-    try {
-      const order = await Order.findById(req.params.orderId);
-      if (!order) {
-        res.status(404).json({ message: 'Pedido no encontrado.' });
-        return;
-      }
-
-      const doc = (order.documentos as unknown as mongoose.Types.DocumentArray<IOrderDocument>).id(req.params.docId as string);
-      if (!doc) {
-        res.status(404).json({ message: 'Documento no encontrado.' });
-        return;
-      }
-
-      if (!doc.firma) {
-        res.json({ status: 'sin_firma', message: 'Este documento no tiene solicitud de firma.' });
-        return;
-      }
-
-      // Si está en progreso, consultar al proveedor
-      if (doc.firma.estado === 'enviado') {
-        const provider = getProvider(doc.firma.provider);
-        const providerStatus = await provider.getSignatureStatus(doc.firma.signatureId);
-
-        if (providerStatus.status !== doc.firma.estado) {
-          doc.firma.estado = providerStatus.status;
-
-          if (providerStatus.status === 'firmado') {
-            doc.firma.firmadoPor = providerStatus.signedBy;
-            doc.firma.rutFirmante = providerStatus.signerRut;
-            doc.firma.fechaFirma = providerStatus.signedAt;
-            doc.firma.archivoFirmado = providerStatus.signedDocumentUrl;
-
-            order.historialEstados.push({
-              estado: 'documento_firmado',
-              fecha: new Date(),
-              observacion: `"${doc.nombre}" firmado por ${providerStatus.signedBy || 'firmante'}`,
-            });
-          } else if (['rechazado', 'expirado', 'error'].includes(providerStatus.status)) {
-            order.historialEstados.push({
-              estado: `firma_${providerStatus.status}`,
-              fecha: new Date(),
-              observacion: `Firma de "${doc.nombre}": ${providerStatus.message}`,
-            });
-          }
-
-          await order.save();
-        }
-
-        res.json({ documento: doc, providerStatus });
-      } else {
-        res.json({ documento: doc });
-      }
-    } catch (error) {
-      console.error('Get signature status error:', error);
-      res.status(500).json({ message: 'Error al consultar estado de firma.' });
-    }
-  }
-);
-
-// POST /api/signatures/callback — webhook del proveedor de firma
-router.post(
-  '/callback',
-  async (req: AuthRequest, res: Response): Promise<void> => {
-    try {
-      const provider = getProvider();
-      const result = await provider.handleCallback(req.body);
-
-      // Buscar la orden que contiene este documento
-      const order = await Order.findOne({
-        'documentos.firma.signatureId': result.signatureId,
-      });
-
-      if (order) {
-        const doc = order.documentos.find(
-          (d) => d.firma?.signatureId === result.signatureId
-        );
-
-        if (doc && doc.firma) {
-          doc.firma.estado = result.status;
-          if (result.status === 'firmado') {
-            doc.firma.firmadoPor = result.signedBy;
-            doc.firma.rutFirmante = result.signerRut;
-            doc.firma.fechaFirma = result.signedAt;
-            doc.firma.archivoFirmado = result.signedDocumentUrl;
-          }
-
-          order.historialEstados.push({
-            estado: `firma_${result.status}`,
-            fecha: new Date(),
-            observacion: `Callback: "${doc.nombre}" - ${result.message}`,
-          });
-
-          await order.save();
-        }
-      }
-
-      res.json({ received: true });
-    } catch (error) {
-      console.error('Signature callback error:', error);
-      res.status(500).json({ message: 'Error procesando callback de firma.' });
-    }
-  }
-);
+});
 
 export default router;

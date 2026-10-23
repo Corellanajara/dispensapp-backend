@@ -15,6 +15,7 @@ export type ExpenseCategory =
 export type IncomeSource = 'venta_productos' | 'pago_pedido' | 'otro';
 
 export interface IFinanceTransaction extends Document {
+  sucursal: Types.ObjectId;
   tipo: TransactionType;
   monto: number;
   descripcion: string;
@@ -33,6 +34,11 @@ export interface IFinanceTransaction extends Document {
 
 const financeTransactionSchema = new Schema<IFinanceTransaction>(
   {
+    sucursal: {
+      type: Schema.Types.ObjectId,
+      ref: 'Sucursal',
+      required: true,
+    },
     tipo: {
       type: String,
       enum: ['ingreso', 'egreso'],
@@ -89,6 +95,7 @@ const financeTransactionSchema = new Schema<IFinanceTransaction>(
   }
 );
 
+financeTransactionSchema.index({ sucursal: 1, tipo: 1, fecha: -1 });
 financeTransactionSchema.index({ tipo: 1 });
 financeTransactionSchema.index({ categoria: 1 });
 financeTransactionSchema.index({ fecha: -1 });

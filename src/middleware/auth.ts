@@ -1,10 +1,12 @@
 import { Request, Response, NextFunction } from 'express';
 import jwt from 'jsonwebtoken';
+import mongoose from 'mongoose';
 import { env } from '../config/env';
 import { User, IUser, UserRole } from '../models/User';
 
 export interface AuthRequest extends Request {
   user?: IUser;
+  sucursalId?: mongoose.Types.ObjectId;
 }
 
 interface JwtPayload {

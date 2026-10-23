@@ -2,6 +2,7 @@ import { Router, Response } from 'express';
 import { body, validationResult } from 'express-validator';
 import { FinanceTransaction } from '../models/Finance';
 import { authenticate, authorize, AuthRequest } from '../middleware/auth';
+import { resolveSucursal, getSucursalFilter } from '../middleware/sucursal';
 import { auditLog } from '../middleware/audit';
 
 const router = Router();
@@ -11,6 +12,7 @@ router.get(
   '/transactions',
   authenticate,
   authorize('admin', 'finanzas'),
+  resolveSucursal({ required: false }),
   async (req: AuthRequest, res: Response): Promise<void> => {
     try {
       const {
@@ -22,7 +24,7 @@ router.get(
         hasta,
       } = req.query as Record<string, string>;
 
-      const filter: Record<string, unknown> = {};
+      const filter: Record<string, unknown> = { ...getSucursalFilter(req) };
       if (tipo) filter.tipo = tipo;
       if (categoria) filter.categoria = categoria;
       if (desde || hasta) {
@@ -37,6 +39,7 @@ router.get(
       const [transactions, total] = await Promise.all([
         FinanceTransaction.find(filter)
           .populate('usuario', 'nombre apellido')
+          .populate('sucursal', 'nombre codigo')
           .sort({ fecha: -1 })
           .skip((pageNum - 1) * limitNum)
           .limit(limitNum),
@@ -64,6 +67,7 @@ router.post(
   '/transactions',
   authenticate,
   authorize('admin', 'finanzas'),
+  resolveSucursal(),
   auditLog('crear', 'transaccion'),
   [
     body('tipo').isIn(['ingreso', 'egreso']).withMessage('Tipo inválido'),
@@ -81,6 +85,7 @@ router.post(
     try {
       const transaction = await FinanceTransaction.create({
         ...req.body,
+        sucursal: req.sucursalId,
         usuario: req.user!._id,
       });
       res.status(201).json(transaction);
@@ -96,6 +101,7 @@ router.get(
   '/summary',
   authenticate,
   authorize('admin', 'finanzas'),
+  resolveSucursal({ required: false }),
   async (req: AuthRequest, res: Response): Promise<void> => {
     try {
       const { desde, hasta } = req.query as Record<string, string>;
@@ -104,7 +110,7 @@ router.get(
       if (desde) dateFilter.$gte = new Date(desde);
       if (hasta) dateFilter.$lte = new Date(hasta);
 
-      const matchStage: Record<string, unknown> = {};
+      const matchStage: Record<string, unknown> = { ...getSucursalFilter(req) };
       if (Object.keys(dateFilter).length > 0) {
         matchStage.fecha = dateFilter;
       }
@@ -158,6 +164,7 @@ router.get(
   '/cashflow',
   authenticate,
   authorize('admin', 'finanzas'),
+  resolveSucursal({ required: false }),
   async (req: AuthRequest, res: Response): Promise<void> => {
     try {
       const { meses = '6' } = req.query as Record<string, string>;
@@ -167,7 +174,7 @@ router.get(
       startDate.setMonth(startDate.getMonth() - numMeses);
 
       const cashflow = await FinanceTransaction.aggregate([
-        { $match: { fecha: { $gte: startDate } } },
+        { $match: { fecha: { $gte: startDate }, ...getSucursalFilter(req) } },
         {
           $group: {
             _id: {

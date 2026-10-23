@@ -1,7 +1,9 @@
-import mongoose, { Schema, Document } from 'mongoose';
+import mongoose, { Schema, Document, Types } from 'mongoose';
 import bcrypt from 'bcryptjs';
 
-export type UserRole = 'admin' | 'operador' | 'produccion' | 'finanzas' | 'paciente';
+export type UserRole = 'admin' | 'operador' | 'produccion' | 'cultivo' | 'finanzas' | 'paciente';
+
+export const USER_ROLES: UserRole[] = ['admin', 'operador', 'produccion', 'cultivo', 'finanzas', 'paciente'];
 
 export interface IUser extends Document {
   email: string;
@@ -11,8 +13,12 @@ export interface IUser extends Document {
   rut: string;
   role: UserRole;
   telefono?: string;
+  sucursales: Types.ObjectId[];
+  sucursalActiva?: Types.ObjectId;
   activo: boolean;
   ultimoAcceso?: Date;
+  intentosFallidos: number;
+  bloqueadoHasta?: Date;
   createdAt: Date;
   updatedAt: Date;
   comparePassword(candidatePassword: string): Promise<boolean>;
@@ -50,18 +56,35 @@ const userSchema = new Schema<IUser>(
     },
     role: {
       type: String,
-      enum: ['admin', 'operador', 'produccion', 'finanzas', 'paciente'],
+      enum: USER_ROLES,
       default: 'operador',
     },
     telefono: {
       type: String,
       trim: true,
     },
+    sucursales: [
+      {
+        type: Schema.Types.ObjectId,
+        ref: 'Sucursal',
+      },
+    ],
+    sucursalActiva: {
+      type: Schema.Types.ObjectId,
+      ref: 'Sucursal',
+    },
     activo: {
       type: Boolean,
       default: true,
     },
     ultimoAcceso: {
+      type: Date,
+    },
+    intentosFallidos: {
+      type: Number,
+      default: 0,
+    },
+    bloqueadoHasta: {
       type: Date,
     },
   },
@@ -82,7 +105,7 @@ userSchema.methods.comparePassword = async function (candidatePassword: string):
 
 userSchema.set('toJSON', {
   transform: (_doc, ret) => {
-    const { password: _, ...rest } = ret;
+    const { password: _, intentosFallidos: _i, ...rest } = ret;
     return rest;
   },
 });
