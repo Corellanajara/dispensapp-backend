@@ -1,6 +1,6 @@
 import mongoose, { Schema, Document, Types } from 'mongoose';
 import { DOCUMENT_TYPES, DocumentType } from '../config/documentos';
-import { documentSignatureSchema, IDocumentSignature } from './shared';
+import { documentSignatureSchema, IDocumentSignature, signerCertificateSchema, ISignerCertificate } from './shared';
 
 export type PatientStatus = 'pendiente' | 'aprobado' | 'rechazado' | 'suspendido';
 export type SuspensionReason = 'receta_vencida' | 'manual';
@@ -53,6 +53,8 @@ export interface IPatient extends Document {
     email?: string;
   };
   documentos: Types.DocumentArray<IDocument & Types.Subdocument>;
+  /** Certificado de firma electrónica avanzada del paciente (si el proveedor lo exige). */
+  certificadoFirma?: ISignerCertificate;
   estado: PatientStatus;
   motivoSuspension?: SuspensionReason;
   activadoPor?: Types.ObjectId;
@@ -156,6 +158,7 @@ const patientSchema = new Schema<IPatient>(
       email: { type: String },
     },
     documentos: [documentSchema],
+    certificadoFirma: signerCertificateSchema,
     estado: {
       type: String,
       enum: ['pendiente', 'aprobado', 'rechazado', 'suspendido'],
@@ -187,5 +190,6 @@ patientSchema.index({ sucursal: 1, estado: 1 });
 patientSchema.index({ 'medicoTratante.nombre': 1 });
 patientSchema.index({ 'documentos.tipo': 1, 'documentos.fechaVencimiento': 1 });
 patientSchema.index({ 'documentos.firma.signatureId': 1 });
+patientSchema.index({ 'certificadoFirma.token': 1 }, { sparse: true });
 
 export const Patient = mongoose.model<IPatient>('Patient', patientSchema);

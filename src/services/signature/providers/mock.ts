@@ -1,30 +1,25 @@
 import { v4 as uuid } from 'uuid';
 import type {
+  CallbackEvent,
   ISignatureProvider,
+  ProviderInfo,
   RequestSignatureParams,
   SignatureInitResult,
-  SignatureStatusResult,
-  SignatureCallbackData,
-  SignatureCallbackResult,
   SignatureStatus,
+  SignatureStatusResult,
 } from '../types';
 
 /**
- * Proveedor de firma electrónica de prueba / desarrollo.
- * Simula el flujo completo sin servicio real.
- * Las firmas se completan automáticamente después de 3 segundos.
+ * Proveedor de firma de prueba para desarrollo local. No tiene validez legal.
+ * La firma se completa sola a los 3 segundos y el "PDF firmado" es el mismo archivo subido.
+ * Guarda el estado en memoria: se pierde al reiniciar el servidor.
  */
 
 interface MockSignature {
   signatureId: string;
-  documentId: string;
-  documentName: string;
   status: SignatureStatus;
   signerName: string;
-  signerEmail: string;
   signerRut?: string;
-  reference: string;
-  createdAt: Date;
   signedAt?: Date;
 }
 
@@ -32,29 +27,32 @@ const signatures = new Map<string, MockSignature>();
 
 export class MockSignatureProvider implements ISignatureProvider {
   readonly name = 'mock';
+  readonly requiresCertificate = false;
+
+  info(): ProviderInfo {
+    return {
+      name: this.name,
+      configurado: true,
+      faltantes: [],
+      requiereCertificado: false,
+      validezLegal: false,
+    };
+  }
 
   async requestSignature(params: RequestSignatureParams): Promise<SignatureInitResult> {
     const signatureId = `sig_${uuid().slice(0, 12)}`;
-
-    const sig: MockSignature = {
+    signatures.set(signatureId, {
       signatureId,
-      documentId: params.documentId,
-      documentName: params.documentName,
       status: 'enviado',
       signerName: params.signer.name,
-      signerEmail: params.signer.email,
       signerRut: params.signer.rut,
-      reference: params.reference,
-      createdAt: new Date(),
-    };
-    signatures.set(signatureId, sig);
+    });
 
-    // Simular firma automática en 3s
     setTimeout(() => {
-      const stored = signatures.get(signatureId);
-      if (stored && stored.status === 'enviado') {
-        stored.status = 'firmado';
-        stored.signedAt = new Date();
+      const s = signatures.get(signatureId);
+      if (s && s.status === 'enviado') {
+        s.status = 'firmado';
+        s.signedAt = new Date();
       }
     }, 3000);
 
@@ -62,79 +60,35 @@ export class MockSignatureProvider implements ISignatureProvider {
       success: true,
       signatureId,
       status: 'enviado',
-      signingUrl: `https://firma-mock.example.com/sign/${signatureId}`,
-      message: 'Solicitud de firma enviada (mock). Esperando firma...',
+      message: 'Firma de prueba enviada: se completa sola en unos segundos (sin validez legal).',
     };
   }
 
   async getSignatureStatus(signatureId: string): Promise<SignatureStatusResult> {
-    const sig = signatures.get(signatureId);
-    if (!sig) {
-      return {
-        signatureId,
-        status: 'error',
-        message: 'Firma no encontrada',
-      };
-    }
-
+    const s = signatures.get(signatureId);
+    if (!s) return { signatureId, status: 'error', message: 'Firma de prueba no encontrada (¿se reinició el servidor?).' };
     return {
       signatureId,
-      status: sig.status,
-      signedBy: sig.status === 'firmado' ? sig.signerName : undefined,
-      signerRut: sig.status === 'firmado' ? sig.signerRut : undefined,
-      signedAt: sig.signedAt,
-      signedDocumentUrl: sig.status === 'firmado'
-        ? `/uploads/signed_${sig.documentId}.pdf`
-        : undefined,
-      message: sig.status === 'firmado'
-        ? `Documento firmado por ${sig.signerName}`
-        : sig.status === 'enviado'
-          ? 'Esperando firma del destinatario...'
-          : `Estado: ${sig.status}`,
+      status: s.status,
+      signedBy: s.status === 'firmado' ? s.signerName : undefined,
+      signerRut: s.status === 'firmado' ? s.signerRut : undefined,
+      signedAt: s.signedAt,
+      message: s.status === 'firmado' ? `Firmado por ${s.signerName} (prueba)` : `Estado: ${s.status}`,
     };
   }
 
   async cancelSignature(signatureId: string): Promise<{ success: boolean; message: string }> {
-    const sig = signatures.get(signatureId);
-    if (!sig) {
-      return { success: false, message: 'Firma no encontrada' };
-    }
-    if (sig.status === 'firmado') {
-      return { success: false, message: 'No se puede cancelar una firma ya completada.' };
-    }
-    sig.status = 'rechazado';
-    return { success: true, message: 'Solicitud de firma cancelada (mock)' };
+    const s = signatures.get(signatureId);
+    if (s && s.status !== 'firmado') s.status = 'cancelado';
+    return { success: true, message: 'Firma de prueba cancelada.' };
   }
 
-  async handleCallback(data: SignatureCallbackData): Promise<SignatureCallbackResult> {
-    const signatureId = data.signatureId as string;
-    const sig = signatures.get(signatureId);
-    if (!sig) {
-      return {
-        signatureId: signatureId || 'unknown',
-        documentId: '',
-        status: 'error',
-        message: 'Firma no encontrada en callback',
-      };
-    }
-
-    const newStatus = (data.status as SignatureStatus) || 'firmado';
-    sig.status = newStatus;
-    if (newStatus === 'firmado') {
-      sig.signedAt = new Date();
-    }
-
-    return {
-      signatureId,
-      documentId: sig.documentId,
-      status: newStatus,
-      signedBy: sig.signerName,
-      signerRut: sig.signerRut,
-      signedAt: sig.signedAt,
-      signedDocumentUrl: newStatus === 'firmado'
-        ? `/uploads/signed_${sig.documentId}.pdf`
-        : undefined,
-      message: `Callback de firma procesado (mock): ${newStatus}`,
-    };
+  async handleCallback(data: Record<string, unknown>): Promise<CallbackEvent> {
+    const signatureId = String(data.signatureId ?? '');
+    const s = signatures.get(signatureId);
+    if (!s) return { tipo: 'ignorado', message: 'Firma de prueba no encontrada.' };
+    s.status = (data.status as SignatureStatus) || 'firmado';
+    if (s.status === 'firmado') s.signedAt = new Date();
+    return { tipo: 'firma', ...(await this.getSignatureStatus(signatureId)) };
   }
 }

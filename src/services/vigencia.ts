@@ -1,6 +1,6 @@
 import { Types } from 'mongoose';
 import { Patient, IPatient, IDocument } from '../models/Patient';
-import { REQUIRED_DOCUMENTS } from '../config/documentos';
+import { documentosRequeridos } from './configuracion';
 import { env } from '../config/env';
 import { registrarAuditoria } from './audit';
 
@@ -34,12 +34,15 @@ export interface RequisitosActivacion {
   advertencias: string[];
 }
 
-/** Revisa los documentos exigidos para activar al paciente (ver config/documentos.ts). */
+/**
+ * Revisa los documentos exigidos para activar al paciente (ver config/documentos.ts).
+ * La firma se exige solo si el administrador la tiene activa para ese tipo de documento.
+ */
 export function verificarRequisitosActivacion(patient: Pick<IPatient, 'documentos'>): RequisitosActivacion {
   const bloqueantes: string[] = [];
   const advertencias: string[] = [];
 
-  for (const req of REQUIRED_DOCUMENTS) {
+  for (const req of documentosRequeridos()) {
     let cumple: boolean;
     let detalle = req.label;
 

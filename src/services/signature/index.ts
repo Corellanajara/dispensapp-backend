@@ -1,13 +1,12 @@
 import type { ISignatureProvider } from './types';
 import { MockSignatureProvider } from './providers/mock';
+import { SignapisProvider } from './providers/signapis';
 import { env } from '../../config/env';
 
 /**
- * Registry de proveedores de firma electrónica.
- *
- * Para agregar un proveedor real:
- *   import { ECertChileProvider } from './providers/ecertchile';
- *   registerProvider(new ECertChileProvider());
+ * Registro de proveedores de firma electrónica. El activo se elige con SIGNATURE_PROVIDER.
+ * - signapis: firma electrónica avanzada real (sandbox o producción según SIGNAPIS_AMBIENTE).
+ * - mock: solo desarrollo local, firma sola y sin validez legal.
  */
 
 const providers = new Map<string, ISignatureProvider>();
@@ -22,7 +21,7 @@ export function getProvider(name?: string): ISignatureProvider {
   if (!provider) {
     throw new Error(
       `Proveedor de firma "${providerName}" no registrado. ` +
-      `Disponibles: ${[...providers.keys()].join(', ') || 'ninguno'}`
+        `Disponibles: ${[...providers.keys()].join(', ') || 'ninguno'}`
     );
   }
   return provider;
@@ -32,16 +31,7 @@ export function listProviders(): string[] {
   return [...providers.keys()];
 }
 
-// ── Registrar proveedores built-in ──────────────────────────
 registerProvider(new MockSignatureProvider());
+registerProvider(new SignapisProvider());
 
-// Re-export types
-export type { ISignatureProvider } from './types';
-export type {
-  RequestSignatureParams,
-  SignatureInitResult,
-  SignatureStatusResult,
-  SignatureCallbackData,
-  SignatureCallbackResult,
-  SignatureStatus,
-} from './types';
+export * from './types';

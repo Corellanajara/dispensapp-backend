@@ -1,7 +1,5 @@
 /**
- * Interfaces agnósticas de proveedor para integración con
- * servicios de firma electrónica (e-certchile, Thomas Signer,
- * Acepta, FirmaGob, etc.).
+ * Interfaces agnósticas de proveedor de firma electrónica.
  *
  * Para agregar un nuevo proveedor:
  *   1. Crear archivo en ./providers/<nombre>.ts
@@ -10,113 +8,151 @@
  *   4. Setear SIGNATURE_PROVIDER=<nombre> en .env
  */
 
-// ─── Tipos base ────────────────────────────────────────────
+import type { SignatureStatus } from '../../models/shared';
 
-export type SignatureStatus =
-  | 'pendiente'
-  | 'enviado'
-  | 'firmado'
-  | 'rechazado'
-  | 'expirado'
-  | 'error';
+export type { SignatureStatus };
+
+/** Error del proveedor con un mensaje que se puede mostrar al usuario. */
+export class SignatureProviderError extends Error {
+  constructor(
+    message: string,
+    public status = 502,
+    public detalle?: { codigo?: string; trackingId?: string; mensajeProveedor?: string }
+  ) {
+    super(message);
+  }
+}
 
 // ─── Parámetros de entrada ─────────────────────────────────
 
+export interface SignerInfo {
+  name: string;
+  email: string;
+  rut?: string;
+}
+
+export interface StampOptions {
+  /** 1 = sello estándar · 2 = texto personalizado · 5 = sin estampa visible */
+  tipoEstampa: 1 | 2 | 5;
+  textoEstampa?: string;
+  conQR: boolean;
+  posicion?: { pagina: number; x: number; y: number } | null;
+}
+
 export interface RequestSignatureParams {
-  /** ID interno del documento */
+  /** ID interno del documento (subdocumento del paciente). */
   documentId: string;
-  /** Nombre del documento (para mostrar al firmante) */
+  /** Nombre de archivo que verá el firmante (debe terminar en .pdf). */
   documentName: string;
-  /** Ruta o URL del archivo a firmar */
-  documentPath: string;
-  /** Datos del firmante */
-  signer: {
-    name: string;
-    email: string;
-    rut?: string;
-  };
-  /** Referencia legible (ej. numeroPedido) */
+  /** Contenido del PDF. */
+  document: Buffer;
+  signer: SignerInfo;
+  /** Número de serie del certificado del firmante (proveedores con requiresCertificate). */
+  certificateSerial?: string;
+  /** Referencia legible (ej. RUT - tipo de documento). */
   reference: string;
-  /** Mensaje personalizado para el firmante */
-  message?: string;
-  /** URL de callback cuando se complete la firma */
-  callbackUrl?: string;
-  /** Metadata adicional */
-  metadata?: Record<string, unknown>;
+  /** A dónde vuelve el firmante al terminar. */
+  redirectUrl: string;
+  estampa: StampOptions;
+}
+
+export interface CertificateRequestParams {
+  rut: string;
+  /** Número de serie (número de documento) de la cédula de identidad. */
+  serialNumber: string;
+  /** Teléfono con código de país, sin espacios (ej. +56912345678). */
+  phone: string;
+  /** Comuna escrita como la espera el proveedor. */
+  comuna: string;
+  email: string;
+  years: 1 | 2 | 3;
+  /** A dónde vuelve el usuario al terminar el enrolamiento. */
+  redirectUrl: string;
 }
 
 // ─── Resultados ────────────────────────────────────────────
 
 export interface SignatureInitResult {
-  /** true si la solicitud fue aceptada por el proveedor */
   success: boolean;
-  /** ID de firma asignado por el proveedor */
+  /** ID de la firma en el proveedor (con este ID llegan las notificaciones). */
   signatureId: string;
-  /** Estado inicial */
   status: SignatureStatus;
-  /** URL para que el firmante realice la firma (si aplica) */
+  /** URL donde el firmante completa la firma. */
   signingUrl?: string;
-  /** Mensaje legible */
   message: string;
-  /** Datos crudos del proveedor */
   raw?: Record<string, unknown>;
 }
 
 export interface SignatureStatusResult {
   signatureId: string;
   status: SignatureStatus;
-  /** Nombre de quien firmó */
   signedBy?: string;
-  /** RUT del firmante */
   signerRut?: string;
-  /** Fecha/hora de la firma */
   signedAt?: Date;
-  /** Ruta o URL del documento firmado */
+  /** URL temporal para descargar el PDF firmado. */
   signedDocumentUrl?: string;
   message: string;
   raw?: Record<string, unknown>;
 }
 
-export interface SignatureCallbackData {
-  [key: string]: unknown;
+export interface CertificateRequestResult {
+  token: string;
+  /** URL donde el usuario valida su identidad para obtener el certificado. */
+  enrollUrl: string;
+  message: string;
 }
 
-export interface SignatureCallbackResult {
-  signatureId: string;
-  documentId: string;
-  status: SignatureStatus;
-  signedBy?: string;
-  signerRut?: string;
-  signedAt?: Date;
-  signedDocumentUrl?: string;
-  message: string;
+/** Notificación del proveedor, ya normalizada. */
+export type CallbackEvent =
+  | ({ tipo: 'firma' } & SignatureStatusResult)
+  | {
+      tipo: 'certificado';
+      estado: 'activo' | 'fallido' | 'en_curso';
+      token?: string;
+      email?: string;
+      numeroSerie?: string;
+      message: string;
+    }
+  | { tipo: 'ignorado'; message: string };
+
+export interface ProviderInfo {
+  name: string;
+  /** true si las credenciales necesarias están configuradas. */
+  configurado: boolean;
+  faltantes: string[];
+  ambiente?: 'pruebas' | 'produccion';
+  baseUrl?: string;
+  /** true si el firmante necesita un certificado propio antes de firmar. */
+  requiereCertificado: boolean;
+  /** true si las firmas tienen validez legal (el mock no). */
+  validezLegal: boolean;
 }
 
 // ─── Interfaz del proveedor ────────────────────────────────
 
 export interface ISignatureProvider {
-  /** Nombre identificador del proveedor (ej. 'ecertchile', 'acepta') */
   readonly name: string;
+  /** El firmante necesita un certificado propio (Signapis: firma electrónica avanzada). */
+  readonly requiresCertificate: boolean;
 
-  /**
-   * Solicita la firma electrónica de un documento.
-   * Envía la solicitud al proveedor y devuelve el ID de seguimiento.
-   */
+  info(): ProviderInfo;
+
   requestSignature(params: RequestSignatureParams): Promise<SignatureInitResult>;
-
-  /**
-   * Consulta el estado de una firma previamente solicitada.
-   */
   getSignatureStatus(signatureId: string): Promise<SignatureStatusResult>;
-
-  /**
-   * Cancela una solicitud de firma pendiente.
-   */
   cancelSignature(signatureId: string): Promise<{ success: boolean; message: string }>;
 
-  /**
-   * Procesa un callback/webhook del proveedor de firma.
-   * Normaliza la respuesta al formato interno.
-   */
-  handleCallback(data: SignatureCallbackData): Promise<SignatureCallbackResult>;
+  /** Normaliza una notificación (webhook) del proveedor. */
+  handleCallback(data: Record<string, unknown>): Promise<CallbackEvent>;
+
+  // ── Certificados del firmante (solo si requiresCertificate) ──
+  /** Número de serie de un certificado activo del firmante, o null si no tiene. */
+  findActiveCertificate?(email: string): Promise<string | null>;
+  requestCertificate?(params: CertificateRequestParams): Promise<CertificateRequestResult>;
+
+  // ── Herramientas de administración ──
+  testConnection?(): Promise<{ ok: boolean; message: string }>;
+  /** Registra en el proveedor la URL del webhook, que enviará el header X-Callback-Secret. */
+  configureWebhook?(url: string, secret: string): Promise<{ message: string }>;
+  getWebhook?(): Promise<{ url?: string; authType?: string } | null>;
+  testWebhook?(): Promise<{ message: string }>;
 }

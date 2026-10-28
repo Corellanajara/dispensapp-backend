@@ -6,7 +6,7 @@ import { Sucursal } from '../models/Sucursal';
 import { Order } from '../models/Order';
 import { AuditLog } from '../models/AuditLog';
 import { EspacioCultivo, Cosecha } from '../models/Cultivo';
-import { DOCUMENT_TYPES, requirementFor } from '../config/documentos';
+import { DOCUMENT_TYPES } from '../config/documentos';
 import { ensurePatientProfileForUser } from '../services/ensurePatientProfile';
 import { authenticate, authorize, AuthRequest } from '../middleware/auth';
 import { resolveSucursal, canAccessSucursal } from '../middleware/sucursal';
@@ -20,7 +20,15 @@ import {
   reactivarSiCorresponde,
   alertasVigencia,
 } from '../services/vigencia';
-import { solicitarFirmaDocumento, actualizarEstadoFirma, FirmaError } from '../services/firmas';
+import {
+  solicitarFirmaDocumento,
+  actualizarEstadoFirma,
+  consultarCertificado,
+  solicitarCertificado,
+  responderErrorFirma,
+  retornoFirma,
+} from '../services/firmas';
+import { requisitoPara } from '../services/configuracion';
 
 const router = Router();
 
@@ -91,7 +99,11 @@ async function crearDocumento(req: AuthRequest, res: Response): Promise<IDocumen
     res.status(400).json({ message: 'Archivo es requerido.' });
     return null;
   }
-  const requisito = requirementFor(req.body.tipo);
+  const requisito = requisitoPara(req.body.tipo);
+  if (requisito?.requiereFirma && req.file.mimetype !== 'application/pdf') {
+    res.status(400).json({ message: `${requisito.label} se firma electrónicamente: súbelo en PDF.` });
+    return null;
+  }
   if (requisito?.requiereVencimiento && !req.body.fechaVencimiento) {
     res.status(400).json({ message: `${requisito.label}: la fecha de vencimiento es obligatoria.` });
     return null;
@@ -321,29 +333,25 @@ router.post(
   authenticate,
   authorize('paciente'),
   auditLog('solicitar_firma', 'paciente'),
+  [body('reiniciar').optional().isBoolean()],
   async (req: AuthRequest, res: Response): Promise<void> => {
+    let patient: IPatient | null = null;
     try {
-      const patient = await ensurePatientProfileForUser(req.user!);
+      patient = await ensurePatientProfileForUser(req.user!);
       const doc = patient && buscarDocumento(patient, String(req.params.docId));
       if (!patient || !doc) {
         res.status(404).json({ message: 'Documento no encontrado.' });
         return;
       }
-      const result = await solicitarFirmaDocumento(
-        patient,
-        doc,
-        { name: `${patient.nombre} ${patient.apellido}`, email: patient.email, rut: patient.rut },
-        req.user!._id as Types.ObjectId
-      );
+      const result = await solicitarFirmaDocumento(patient, doc, req.user!._id as Types.ObjectId, {
+        redirectUrl: retornoFirma.paciente(),
+        reiniciar: req.body.reiniciar === true,
+      });
       await patient.save();
       res.json({ paciente: conVigencia(patient), firma: result });
     } catch (error) {
-      if (error instanceof FirmaError) {
-        res.status(error.status).json({ message: error.message });
-        return;
-      }
-      console.error('Request own signature error:', error);
-      res.status(500).json({ message: 'Error al solicitar firma.' });
+      if (patient?.isModified()) await patient.save().catch(() => undefined);
+      responderErrorFirma(res, error, 'Error al solicitar firma');
     }
   }
 );
@@ -364,8 +372,60 @@ router.get(
       if (await actualizarEstadoFirma(doc)) await patient.save();
       res.json({ documento: doc });
     } catch (error) {
-      console.error('Get own signature status error:', error);
-      res.status(500).json({ message: 'Error al consultar firma.' });
+      responderErrorFirma(res, error, 'Error al consultar firma');
+    }
+  }
+);
+
+// GET /api/patients/me/certificado-firma — estado del certificado de firma del paciente
+router.get(
+  '/me/certificado-firma',
+  authenticate,
+  authorize('paciente'),
+  async (req: AuthRequest, res: Response): Promise<void> => {
+    try {
+      const patient = await ensurePatientProfileForUser(req.user!);
+      if (!patient) {
+        res.status(404).json({ message: SIN_PERFIL });
+        return;
+      }
+      const estado = await consultarCertificado(patient);
+      if (patient.isModified()) await patient.save();
+      res.json(estado);
+    } catch (error) {
+      responderErrorFirma(res, error, 'Error al consultar el certificado de firma');
+    }
+  }
+);
+
+// POST /api/patients/me/certificado-firma — el paciente pide su certificado de firma
+router.post(
+  '/me/certificado-firma',
+  authenticate,
+  authorize('paciente'),
+  auditLog('solicitar_certificado_firma', 'paciente'),
+  [
+    body('serieCedula').isString().notEmpty().withMessage('Indica el número de documento de tu cédula'),
+    body('telefono').optional({ values: 'falsy' }).isString(),
+    body('comuna').optional({ values: 'falsy' }).isString(),
+  ],
+  async (req: AuthRequest, res: Response): Promise<void> => {
+    const errors = validationResult(req);
+    if (!errors.isEmpty()) {
+      res.status(400).json({ message: errors.array()[0].msg, errors: errors.array() });
+      return;
+    }
+    try {
+      const patient = await ensurePatientProfileForUser(req.user!);
+      if (!patient) {
+        res.status(404).json({ message: SIN_PERFIL });
+        return;
+      }
+      const result = await solicitarCertificado(patient, req.body, retornoFirma.pacienteCertificado());
+      await patient.save();
+      res.json(result);
+    } catch (error) {
+      responderErrorFirma(res, error, 'Error al solicitar el certificado de firma');
     }
   }
 );
@@ -639,7 +699,7 @@ router.patch(
 
       if (req.body.fechaVencimiento) doc.fechaVencimiento = new Date(req.body.fechaVencimiento);
 
-      const requisito = requirementFor(doc.tipo);
+      const requisito = requisitoPara(doc.tipo);
       if (req.body.estado === 'aprobado' && requisito?.requiereVencimiento && !doc.fechaVencimiento) {
         res.status(400).json({ message: `Indica la fecha de vencimiento de la ${requisito.label.toLowerCase()}.` });
         return;

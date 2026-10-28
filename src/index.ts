@@ -5,8 +5,10 @@ import morgan from 'morgan';
 import rateLimit from 'express-rate-limit';
 import { connectDB } from './config/database';
 import { env } from './config/env';
-import { REQUIRED_DOCUMENTS, DOCUMENT_TYPE_LABELS } from './config/documentos';
-import { PUBLIC_DIR } from './services/storage';
+import { DOCUMENT_TYPE_LABELS } from './config/documentos';
+import { cargarConfiguracion, configFirma, documentosRequeridos } from './services/configuracion';
+import { getProvider } from './services/signature';
+import { PUBLIC_DIR, estadoAlmacenamiento } from './services/storage';
 import { iniciarRevisionVigencias } from './services/vigencia';
 
 // Route imports
@@ -94,8 +96,20 @@ app.get('/api/config', (_req, res) => {
   res.json({
     pagosHabilitados: env.PAGOS_HABILITADOS,
     diasAvisoReceta: env.DIAS_AVISO_RECETA,
-    documentosRequeridos: REQUIRED_DOCUMENTS,
+    documentosRequeridos: documentosRequeridos(),
     tiposDocumento: DOCUMENT_TYPE_LABELS,
+    firma: (() => {
+      const cfg = configFirma();
+      const info = getProvider().info();
+      return {
+        habilitada: cfg.habilitada,
+        tiposConFirma: cfg.habilitada ? cfg.tiposConFirma : [],
+        proveedor: info.name,
+        ambiente: info.ambiente ?? null,
+        requiereCertificado: info.requiereCertificado,
+        validezLegal: info.validezLegal,
+      };
+    })(),
   });
 });
 
@@ -132,7 +146,12 @@ app.use('/api/transferencias', transferenciaRoutes);
 
 // Health check
 app.get('/api/health', (_req, res) => {
-  res.json({ status: 'ok', timestamp: new Date().toISOString() });
+  const almacenamiento = estadoAlmacenamiento();
+  res.json({
+    status: 'ok',
+    timestamp: new Date().toISOString(),
+    almacenamiento: { tipo: almacenamiento.tipo, persistente: almacenamiento.persistente },
+  });
 });
 
 // Errores no controlados (ej. multer, CORS)
@@ -152,10 +171,20 @@ app.use((err: Error, _req: Request, res: Response, _next: NextFunction) => {
 // Start server
 const startServer = async () => {
   await connectDB();
+  await cargarConfiguracion();
   iniciarRevisionVigencias();
   app.listen(env.PORT, () => {
     console.log(`Server running on port ${env.PORT} in ${env.NODE_ENV} mode`);
     console.log(`Pagos: ${env.PAGOS_HABILITADOS ? 'habilitados' : 'deshabilitados'} | CORS: ${env.CORS_ORIGINS.join(', ')}`);
+    const almacenamiento = estadoAlmacenamiento();
+    if (almacenamiento.persistente) console.log(`Archivos: ${almacenamiento.detalle}`);
+    else console.error(`ADVERTENCIA archivos: ${almacenamiento.detalle}`);
+    const firma = getProvider().info();
+    console.log(
+      `Firma: ${configFirma().habilitada ? 'activa' : 'desactivada'} | proveedor ${firma.name}` +
+        (firma.ambiente ? ` (${firma.ambiente})` : '') +
+        (firma.configurado ? '' : ` | faltan: ${firma.faltantes.join(', ')}`)
+    );
   });
 };
 

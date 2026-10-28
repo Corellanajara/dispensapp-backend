@@ -43,7 +43,7 @@ if (isS3Configured) {
   });
   console.log(`S3 storage configured (bucket: ${env.AWS_S3_BUCKET})`);
 } else {
-  console.log('S3 not configured – using local storage');
+  console.log(`S3 not configured – using local storage (${path.resolve(env.UPLOAD_DIR)})`);
 }
 
 export const UPLOAD_ROOT = path.resolve(env.UPLOAD_DIR);
@@ -55,6 +55,34 @@ for (const dir of [UPLOAD_ROOT, PUBLIC_DIR, PRIVATE_DIR]) {
 }
 
 const DOWNLOAD_TTL_SECONDS = 300;
+
+export interface EstadoAlmacenamiento {
+  tipo: 's3' | 'volumen' | 'local';
+  /** false = los archivos se borran en el próximo deploy. */
+  persistente: boolean;
+  detalle: string;
+}
+
+/** Dónde quedan los archivos y si sobreviven a un deploy. */
+export function estadoAlmacenamiento(): EstadoAlmacenamiento {
+  if (isS3Configured) {
+    return { tipo: 's3', persistente: true, detalle: `Amazon S3 (bucket ${env.AWS_S3_BUCKET}).` };
+  }
+  const volumen = env.RAILWAY_VOLUME_MOUNT_PATH ? path.resolve(env.RAILWAY_VOLUME_MOUNT_PATH) : '';
+  if (volumen && (UPLOAD_ROOT === volumen || UPLOAD_ROOT.startsWith(volumen + path.sep))) {
+    return { tipo: 'volumen', persistente: true, detalle: `Volumen de Railway (${UPLOAD_ROOT}).` };
+  }
+  if (env.EN_RAILWAY) {
+    return {
+      tipo: 'local',
+      persistente: false,
+      detalle: volumen
+        ? `UPLOAD_DIR (${UPLOAD_ROOT}) está fuera del volumen (${volumen}): los archivos se borran en cada deploy.`
+        : 'Disco temporal de Railway: los archivos se borran en cada deploy. Agrega un volumen al servicio o configura S3.',
+    };
+  }
+  return { tipo: 'local', persistente: true, detalle: `Disco local (${UPLOAD_ROOT}).` };
+}
 
 interface UploadOptions {
   /** true para documentos de pacientes o notas. Por defecto false (imagen pública). */
@@ -162,6 +190,53 @@ export function resolveDownloadToken(token: string): string | null {
   } catch {
     return null;
   }
+}
+
+/** Lee el contenido de un archivo guardado (para enviarlo a un proveedor externo, ej. firma). */
+export async function readFileBuffer(ref: string): Promise<Buffer | null> {
+  const parsed = parseRef(ref);
+
+  if (parsed.kind === 's3') {
+    if (!s3Client) return null;
+    const obj = await s3Client.send(new GetObjectCommand({ Bucket: env.AWS_S3_BUCKET, Key: parsed.key }));
+    if (!obj.Body) return null;
+    return Buffer.from(await obj.Body.transformToByteArray());
+  }
+
+  if (parsed.kind === 'local') {
+    const abs = safeLocalPath(parsed.relative);
+    if (!abs || !fs.existsSync(abs)) return null;
+    return fs.readFileSync(abs);
+  }
+
+  return null;
+}
+
+/**
+ * Guarda un archivo generado por el sistema (ej. PDF firmado que entrega el proveedor)
+ * y devuelve la referencia a guardar en la base de datos.
+ */
+export async function saveBuffer(
+  buffer: Buffer,
+  nombre: string,
+  contentType: string,
+  opts: UploadOptions = {}
+): Promise<string> {
+  const privado = opts.privado ?? true;
+  const filename = `${Date.now()}-${Math.round(Math.random() * 1e9)}-${nombre.replace(/[^a-zA-Z0-9._-]/g, '_')}`;
+
+  if (isS3Configured && s3Client) {
+    const key = `${privado ? 'documentos' : 'products'}/${filename}`;
+    await s3Client.send(
+      new PutObjectCommand({ Bucket: env.AWS_S3_BUCKET, Key: key, Body: buffer, ContentType: contentType })
+    );
+    if (privado) return `s3:${key}`;
+    return `https://${env.AWS_S3_BUCKET}.s3.${env.AWS_REGION}.amazonaws.com/${key}`;
+  }
+
+  const dest = path.join(privado ? PRIVATE_DIR : PUBLIC_DIR, filename);
+  fs.writeFileSync(dest, buffer);
+  return privado ? `local:private/${filename}` : `/uploads/public/${filename}`;
 }
 
 /**
