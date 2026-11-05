@@ -497,10 +497,11 @@ router.get(
 
 // ─── Webhook del proveedor ─────────────────────────────────
 
-// POST /api/signatures/callback — exige el header X-Callback-Secret = SIGNATURE_CALLBACK_SECRET.
+// POST /api/signatures/callback — exige el header x-api-key (Signapis) o X-Callback-Secret = SIGNATURE_CALLBACK_SECRET.
 // Signapis lo envía porque el webhook se registra con authType WEBHOOK_API_KEY (ver /proveedor/webhook).
 router.post('/callback', async (req: AuthRequest, res: Response): Promise<void> => {
-  if (!env.SIGNATURE_CALLBACK_SECRET || req.header('X-Callback-Secret') !== env.SIGNATURE_CALLBACK_SECRET) {
+  const secreto = req.header('x-api-key') ?? req.header('X-Callback-Secret');
+  if (!env.SIGNATURE_CALLBACK_SECRET || secreto !== env.SIGNATURE_CALLBACK_SECRET) {
     void registrarAuditoria({
       req,
       accion: 'callback_firma_rechazado',

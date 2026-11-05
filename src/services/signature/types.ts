@@ -151,7 +151,7 @@ export interface ISignatureProvider {
 
   // ── Herramientas de administración ──
   testConnection?(): Promise<{ ok: boolean; message: string }>;
-  /** Registra en el proveedor la URL del webhook, que enviará el header X-Callback-Secret. */
+  /** Registra en el proveedor la URL del webhook, que enviará el secreto en el header x-api-key. */
   configureWebhook?(url: string, secret: string): Promise<{ message: string }>;
   getWebhook?(): Promise<{ url?: string; authType?: string } | null>;
   testWebhook?(): Promise<{ message: string }>;

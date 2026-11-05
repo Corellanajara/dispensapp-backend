@@ -460,8 +460,8 @@ export class SignapisProvider implements ISignatureProvider {
     await this.llamar('POST', '/v2/company/webhook', 'configurar el webhook', {
       url,
       authType: 'WEBHOOK_API_KEY',
-      // Signapis enviará estos headers en cada notificación.
-      authValue: { 'X-Callback-Secret': secret, 'Content-Type': 'application/json' },
+      // Signapis enviará estos headers en cada notificación (con WEBHOOK_API_KEY exige que se llame x-api-key).
+      authValue: { 'x-api-key': secret, 'Content-Type': 'application/json' },
     });
     return { message: `Webhook registrado en Signapis: ${url}` };
   }
