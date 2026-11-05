@@ -1,6 +1,8 @@
 import axios from 'axios';
 import { Types } from 'mongoose';
 import { Patient, IPatient, IDocument } from '../models/Patient';
+import { FirmaDemo } from '../models/FirmaDemo';
+import type { IDocumentSignature, ISignerCertificate } from '../models/shared';
 import { DOCUMENT_TYPE_LABELS, DocumentType } from '../config/documentos';
 import { comunaSignapis } from '../config/comunas';
 import { env } from '../config/env';
@@ -92,7 +94,23 @@ function firmante(patient: IPatient) {
 
 // ─── Proveedor y reglas ────────────────────────────────────
 
-function proveedorActivo(): ISignatureProvider {
+/** Quien firma: un paciente o la firma de prueba del administrador. */
+export interface TitularFirma {
+  rut: string;
+  email: string;
+  telefono?: string;
+  direccion?: { comuna?: string };
+  certificadoFirma?: ISignerCertificate;
+}
+
+/** Documento que se envía a firmar: del paciente o de la firma de prueba. */
+export interface DocFirmable {
+  _id: Types.ObjectId;
+  archivo: string;
+  firma?: IDocumentSignature;
+}
+
+export function proveedorActivo(): ISignatureProvider {
   const provider = getProvider();
   if (provider.name === 'mock' && env.NODE_ENV === 'production') {
     throw new FirmaError(
@@ -137,7 +155,7 @@ export interface EstadoCertificado {
  * Busca un certificado activo del paciente en el proveedor y lo deja registrado en la ficha.
  * @returns número de serie, o null si no tiene.
  */
-async function certificadoVigente(patient: IPatient, provider: ISignatureProvider): Promise<string | null> {
+export async function certificadoVigente(patient: TitularFirma, provider: ISignatureProvider): Promise<string | null> {
   if (!provider.requiresCertificate || !provider.findActiveCertificate) return null;
   const serie = await provider.findActiveCertificate(patient.email);
   if (serie) {
@@ -190,11 +208,13 @@ export interface DatosEnrolamiento {
  * Devuelve la URL donde el paciente valida su identidad. El llamador debe guardar el paciente.
  */
 export async function solicitarCertificado(
-  patient: IPatient,
+  patient: TitularFirma,
   datos: DatosEnrolamiento,
-  redirectUrl: string
+  redirectUrl: string,
+  opts: { esPrueba?: boolean } = {}
 ): Promise<{ enrollUrl: string; message: string }> {
-  if (!configFirma().habilitada) {
+  // La firma de prueba funciona aunque el administrador haya apagado la firma.
+  if (!opts.esPrueba && !configFirma().habilitada) {
     throw new FirmaError('La firma electrónica está desactivada por el administrador.', 400, 'DESHABILITADA');
   }
   const provider = proveedorActivo();
@@ -202,7 +222,11 @@ export async function solicitarCertificado(
     throw new FirmaError('Este proveedor de firma no necesita certificado.', 400, 'NO_REQUIERE');
   }
   if (await certificadoVigente(patient, provider)) {
-    throw new FirmaError('El paciente ya tiene un certificado de firma activo.', 409, 'ESTADO');
+    throw new FirmaError(
+      opts.esPrueba ? 'Ese correo ya tiene un certificado de firma activo.' : 'El paciente ya tiene un certificado de firma activo.',
+      409,
+      'ESTADO'
+    );
   }
 
   const serialNumber = formatearSerieCedula(datos.serieCedula);
@@ -215,7 +239,7 @@ export async function solicitarCertificado(
   }
   const comuna = comunaSignapis(datos.comuna || patient.direccion?.comuna);
   if (!comuna) {
-    throw new FirmaError('Selecciona la comuna de residencia del paciente de la lista.', 400, 'COMUNA');
+    throw new FirmaError('Selecciona la comuna de residencia de la lista.', 400, 'COMUNA');
   }
   const phone = formatearTelefono(datos.telefono || patient.telefono);
   if (!phone) {
@@ -238,7 +262,9 @@ export async function solicitarCertificado(
     token: result.token,
     email: patient.email,
     enrolamientoUrl: result.enrollUrl,
-    mensaje: 'Esperando que el paciente valide su identidad en Signapis.',
+    mensaje: opts.esPrueba
+      ? 'Esperando la validación de identidad en Signapis.'
+      : 'Esperando que el paciente valide su identidad en Signapis.',
     fechaSolicitud: new Date(),
   };
   return { enrollUrl: result.enrollUrl, message: result.message };
@@ -337,7 +363,7 @@ export async function solicitarFirmaDocumento(
 }
 
 /** Cancela una firma en curso. El llamador debe guardar el paciente. */
-export async function cancelarFirma(doc: IDocument): Promise<void> {
+export async function cancelarFirma(doc: DocFirmable): Promise<void> {
   if (!doc.firma || doc.firma.estado !== 'enviado') {
     throw new FirmaError('No hay una firma en curso para cancelar.', 400, 'ESTADO');
   }
@@ -348,7 +374,7 @@ export async function cancelarFirma(doc: IDocument): Promise<void> {
 }
 
 /** Descarga el PDF firmado desde el enlace temporal del proveedor y lo guarda en nuestro almacenamiento. */
-async function guardarPdfFirmado(url: string, doc: IDocument): Promise<string> {
+async function guardarPdfFirmado(url: string, doc: DocFirmable): Promise<string> {
   const resp = await axios.get<ArrayBuffer>(url, { responseType: 'arraybuffer', timeout: 20_000, maxContentLength: 30 * 1024 * 1024 });
   const buffer = Buffer.from(resp.data);
   if (buffer.subarray(0, 5).toString('latin1') !== '%PDF-') {
@@ -363,7 +389,7 @@ async function guardarPdfFirmado(url: string, doc: IDocument): Promise<string> {
  * @returns true si cambió algo (el llamador debe guardar el paciente).
  */
 export async function aplicarResultadoFirma(
-  doc: IDocument,
+  doc: DocFirmable,
   result: SignatureStatusResult,
   opts: { fallarSiNoDescarga?: boolean } = {}
 ): Promise<boolean> {
@@ -410,7 +436,7 @@ export async function aplicarResultadoFirma(
  * Consulta al proveedor el estado de una firma en curso (respaldo si no llegó el webhook).
  * @returns true si cambió (el llamador debe guardar el paciente).
  */
-export async function actualizarEstadoFirma(doc: IDocument): Promise<boolean> {
+export async function actualizarEstadoFirma(doc: DocFirmable): Promise<boolean> {
   const firma = doc.firma;
   if (!firma) return false;
   const pendienteArchivo = firma.estado === 'firmado' && !firma.archivoFirmado;
@@ -422,6 +448,21 @@ export async function actualizarEstadoFirma(doc: IDocument): Promise<boolean> {
 
 // ─── Notificaciones del proveedor ──────────────────────────
 
+function aplicarEventoCertificado(
+  c: ISignerCertificate,
+  evento: Extract<CallbackEvent, { tipo: 'certificado' }>
+): void {
+  c.mensaje = evento.message;
+  if (evento.estado === 'activo') {
+    c.estado = 'activo';
+    c.numeroSerie = evento.numeroSerie ?? c.numeroSerie;
+    c.fechaEmision = new Date();
+    c.enrolamientoUrl = undefined;
+  } else if (evento.estado === 'fallido') {
+    c.estado = 'fallido';
+  }
+}
+
 /** Procesa una notificación ya normalizada. Devuelve un resumen para el log. */
 export async function procesarNotificacion(evento: CallbackEvent): Promise<string> {
   if (evento.tipo === 'ignorado') return evento.message;
@@ -429,7 +470,15 @@ export async function procesarNotificacion(evento: CallbackEvent): Promise<strin
   if (evento.tipo === 'firma') {
     const patient = await Patient.findOne({ 'documentos.firma.signatureId': evento.signatureId });
     const doc = patient?.documentos.find((d) => d.firma?.signatureId === evento.signatureId);
-    if (!patient || !doc) return `Firma ${evento.signatureId} no corresponde a ningún documento.`;
+    if (!patient || !doc) {
+      const demo = await FirmaDemo.findOne({ 'firma.signatureId': evento.signatureId });
+      if (!demo) return `Firma ${evento.signatureId} no corresponde a ningún documento.`;
+      if (await aplicarResultadoFirma(demo, evento, { fallarSiNoDescarga: true })) {
+        demo.markModified('firma');
+        await demo.save();
+      }
+      return `Firma de prueba ${demo._id}: ${demo.firma!.estado}.`;
+    }
 
     if (await aplicarResultadoFirma(doc, evento, { fallarSiNoDescarga: true })) {
       await patient.save();
@@ -460,18 +509,17 @@ export async function procesarNotificacion(evento: CallbackEvent): Promise<strin
   if (!filtros.length) return 'Notificación de certificado sin datos para identificar al paciente.';
 
   const patient = await Patient.findOne({ $or: filtros });
-  if (!patient?.certificadoFirma) return 'Notificación de certificado sin paciente asociado.';
+  if (!patient?.certificadoFirma) {
+    const demo = await FirmaDemo.findOne({ $or: filtros });
+    if (!demo?.certificadoFirma) return 'Notificación de certificado sin paciente asociado.';
+    aplicarEventoCertificado(demo.certificadoFirma, evento);
+    demo.markModified('certificadoFirma');
+    await demo.save();
+    return `Certificado de la firma de prueba ${demo._id}: ${demo.certificadoFirma.estado}.`;
+  }
 
   const c = patient.certificadoFirma;
-  c.mensaje = evento.message;
-  if (evento.estado === 'activo') {
-    c.estado = 'activo';
-    c.numeroSerie = evento.numeroSerie ?? c.numeroSerie;
-    c.fechaEmision = new Date();
-    c.enrolamientoUrl = undefined;
-  } else if (evento.estado === 'fallido') {
-    c.estado = 'fallido';
-  }
+  aplicarEventoCertificado(c, evento);
   patient.markModified('certificadoFirma');
   await patient.save();
 
@@ -509,5 +557,6 @@ export const retornoFirma = {
   personal: () => `${env.FRONTEND_URL}/firma/completada`,
   personalCertificado: () => `${env.FRONTEND_URL}/firma/completada?paso=certificado`,
   paciente: () => `${env.FRONTEND_URL}/portal/perfil?firma=listo`,
+  prueba: () => `${env.FRONTEND_URL}/configuracion/firma?prueba=listo`,
   pacienteCertificado: () => `${env.FRONTEND_URL}/portal/perfil?certificado=listo`,
 };

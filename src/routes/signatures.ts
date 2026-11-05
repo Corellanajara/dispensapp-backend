@@ -1,3 +1,4 @@
+import fs from 'fs';
 import { Router, Response } from 'express';
 import { body, validationResult } from 'express-validator';
 import mongoose, { Types } from 'mongoose';
@@ -7,7 +8,9 @@ import { authenticate, authorize, AuthRequest } from '../middleware/auth';
 import { canAccessSucursal } from '../middleware/sucursal';
 import { auditLog } from '../middleware/audit';
 import { upload } from '../middleware/upload';
-import { uploadFile, getDownloadUrl, estadoAlmacenamiento } from '../services/storage';
+import { uploadFile, getDownloadUrl, estadoAlmacenamiento, deleteFile } from '../services/storage';
+import { FirmaDemo, IFirmaDemo } from '../models/FirmaDemo';
+import { crearDemo, refrescarDemo, certificadoDemo, firmarDemo, vistaDemo } from '../services/firmaDemo';
 import { registrarAuditoria } from '../services/audit';
 import { getProvider, listProviders } from '../services/signature';
 import {
@@ -496,6 +499,135 @@ router.get(
 );
 
 // ─── Webhook del proveedor ─────────────────────────────────
+
+// ─── Firma de prueba (administrador) ───────────────────────
+
+async function cargarDemo(req: AuthRequest, res: Response): Promise<IFirmaDemo | null> {
+  const id = String(req.params.id);
+  const demo = mongoose.isValidObjectId(id) ? await FirmaDemo.findById(id) : null;
+  if (!demo) res.status(404).json({ message: 'Firma de prueba no encontrada.' });
+  return demo;
+}
+
+// GET /api/signatures/demo — últimas firmas de prueba
+router.get('/demo', authenticate, authorize('admin'), async (_req: AuthRequest, res: Response): Promise<void> => {
+  try {
+    const demos = await FirmaDemo.find().sort({ createdAt: -1 }).limit(10);
+    const requiere = getProvider().requiresCertificate;
+    res.json({ demos: demos.map((d) => vistaDemo(d, requiere)) });
+  } catch (error) {
+    responderErrorFirma(res, error, 'Error al listar las firmas de prueba');
+  }
+});
+
+// POST /api/signatures/demo — crea una firma de prueba con un PDF (multipart: archivo, nombre, rut, email)
+router.post(
+  '/demo',
+  authenticate,
+  authorize('admin'),
+  upload.single('archivo'),
+  [
+    body('nombre').trim().notEmpty().withMessage('Escribe el nombre de quien firma'),
+    body('rut').trim().notEmpty().withMessage('Escribe el RUT de quien firma'),
+    body('email').trim().isEmail().withMessage('Correo inválido'),
+  ],
+  async (req: AuthRequest, res: Response): Promise<void> => {
+    if (!validar(req, res)) {
+      if (req.file) void fs.promises.unlink(req.file.path).catch(() => undefined);
+      return;
+    }
+    try {
+      const demo = await crearDemo(req.body, req.file, req.user!._id as Types.ObjectId);
+      void registrarAuditoria({
+        req,
+        usuario: req.user!._id as Types.ObjectId,
+        accion: 'firma_prueba_creada',
+        entidad: 'firma',
+        detalles: { demo: demo._id, email: demo.email },
+      });
+      res.status(201).json(await refrescarDemo(demo));
+    } catch (error) {
+      responderErrorFirma(res, error, 'No se pudo crear la firma de prueba');
+    }
+  }
+);
+
+// GET /api/signatures/demo/:id — estado actualizado (consulta a Signapis)
+router.get('/demo/:id', authenticate, authorize('admin'), async (req: AuthRequest, res: Response): Promise<void> => {
+  try {
+    const demo = await cargarDemo(req, res);
+    if (!demo) return;
+    res.json(await refrescarDemo(demo));
+  } catch (error) {
+    responderErrorFirma(res, error, 'No se pudo consultar la firma de prueba');
+  }
+});
+
+// POST /api/signatures/demo/:id/certificado — pide el certificado del firmante { serieCedula, telefono, comuna }
+router.post(
+  '/demo/:id/certificado',
+  authenticate,
+  authorize('admin'),
+  [body('serieCedula').trim().notEmpty().withMessage('Escribe el número de documento de la cédula')],
+  async (req: AuthRequest, res: Response): Promise<void> => {
+    if (!validar(req, res)) return;
+    try {
+      const demo = await cargarDemo(req, res);
+      if (!demo) return;
+      const { serieCedula, telefono, comuna } = req.body;
+      res.json(await certificadoDemo(demo, { serieCedula, telefono, comuna }));
+    } catch (error) {
+      responderErrorFirma(res, error, 'No se pudo solicitar el certificado de prueba');
+    }
+  }
+);
+
+// POST /api/signatures/demo/:id/firmar — envía el PDF a firmar y devuelve el enlace de firma
+router.post('/demo/:id/firmar', authenticate, authorize('admin'), async (req: AuthRequest, res: Response): Promise<void> => {
+  try {
+    const demo = await cargarDemo(req, res);
+    if (!demo) return;
+    res.json(await firmarDemo(demo, req.user!._id as Types.ObjectId));
+  } catch (error) {
+    responderErrorFirma(res, error, 'No se pudo enviar a firmar el documento de prueba');
+  }
+});
+
+// GET /api/signatures/demo/:id/archivo?firmado=true — enlace temporal del PDF original o firmado
+router.get('/demo/:id/archivo', authenticate, authorize('admin'), async (req: AuthRequest, res: Response): Promise<void> => {
+  try {
+    const demo = await cargarDemo(req, res);
+    if (!demo) return;
+    const ref = req.query.firmado === 'true' ? demo.firma?.archivoFirmado : demo.archivo;
+    const url = ref ? await getDownloadUrl(ref, baseUrl(req)) : null;
+    if (!url) {
+      res.status(404).json({ message: 'El archivo no está disponible.' });
+      return;
+    }
+    res.json({ url });
+  } catch (error) {
+    responderErrorFirma(res, error, 'No se pudo obtener el archivo de prueba');
+  }
+});
+
+// DELETE /api/signatures/demo/:id — borra la prueba y sus PDF (cancela la firma si estaba en curso)
+router.delete('/demo/:id', authenticate, authorize('admin'), async (req: AuthRequest, res: Response): Promise<void> => {
+  try {
+    const demo = await cargarDemo(req, res);
+    if (!demo) return;
+    if (demo.firma?.estado === 'enviado') {
+      await getProvider(demo.firma.provider)
+        .cancelSignature(demo.firma.signatureId)
+        .catch((err) => console.warn('[firma prueba] No se pudo cancelar:', (err as Error).message));
+    }
+    await deleteFile(demo.archivo);
+    if (demo.firma?.archivoFirmado && demo.firma.archivoFirmado !== demo.archivo) await deleteFile(demo.firma.archivoFirmado);
+    await demo.deleteOne();
+    res.json({ message: 'Firma de prueba eliminada.' });
+  } catch (error) {
+    responderErrorFirma(res, error, 'No se pudo eliminar la firma de prueba');
+  }
+});
 
 // POST /api/signatures/callback — exige el header x-api-key (Signapis) o X-Callback-Secret = SIGNATURE_CALLBACK_SECRET.
 // Signapis lo envía porque el webhook se registra con authType WEBHOOK_API_KEY (ver /proveedor/webhook).
