@@ -10,6 +10,18 @@ import { registrarAuditoria } from '../services/audit';
 
 const router = Router();
 
+/**
+ * Sucursales que el usuario puede seleccionar.
+ * El admin tiene acceso a todas, así que se le listan todas las activas aunque no tenga ninguna asignada.
+ */
+async function sucursalesDisponibles(user: { role: string; sucursales?: unknown[] } | null): Promise<unknown[]> {
+  if (!user) return [];
+  if (user.role === 'admin') {
+    return Sucursal.find({ activo: true }).select('nombre codigo').sort({ nombre: 1 });
+  }
+  return user.sucursales || [];
+}
+
 const generateToken = (id: string, role: string): string => {
   return jwt.sign({ id, role }, env.JWT_SECRET, {
     expiresIn: env.JWT_EXPIRES_IN,
@@ -314,7 +326,7 @@ router.post(
           nombre: user.nombre,
           apellido: user.apellido,
           role: user.role,
-          sucursales: populatedUser?.sucursales || [],
+          sucursales: await sucursalesDisponibles(populatedUser),
           sucursalActiva: populatedUser?.sucursalActiva || null,
         },
       });
@@ -329,7 +341,11 @@ router.post(
 router.get('/me', authenticate, async (req: AuthRequest, res: Response): Promise<void> => {
   try {
     const user = await User.findById(req.user!._id).populate('sucursales', 'nombre codigo');
-    res.json({ user });
+    if (!user) {
+      res.status(404).json({ message: 'Usuario no encontrado.' });
+      return;
+    }
+    res.json({ user: { ...user.toJSON(), sucursales: await sucursalesDisponibles(user) } });
   } catch (error) {
     console.error('Get me error:', error);
     res.status(500).json({ message: 'Error al obtener usuario.' });
@@ -362,7 +378,7 @@ router.patch(
       await user.save();
 
       const updated = await User.findById(user._id).populate('sucursales', 'nombre codigo');
-      res.json({ user: updated });
+      res.json({ user: updated && { ...updated.toJSON(), sucursales: await sucursalesDisponibles(updated) } });
     } catch (error) {
       console.error('Set active sucursal error:', error);
       res.status(500).json({ message: 'Error al cambiar sucursal activa.' });
