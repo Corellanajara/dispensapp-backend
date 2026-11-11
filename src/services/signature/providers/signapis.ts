@@ -332,7 +332,8 @@ export class SignapisProvider implements ISignatureProvider {
     try {
       const resp = await this.llamar<Array<Json>>(
         'GET',
-        `/v2/certificates/${encodeURIComponent(email)}`,
+        // Signapis no decodifica %40: con el @ codificado responde "User not found".
+        `/v2/certificates/${encodeURIComponent(email).replace(/%40/gi, '@')}`,
         'consultar certificados'
       );
       const activos = (resp.data ?? [])
