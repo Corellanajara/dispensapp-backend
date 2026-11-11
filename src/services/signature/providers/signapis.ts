@@ -33,6 +33,9 @@ const URLS = {
 } as const;
 
 const MAX_PDF_BYTES = 5 * 1024 * 1024; // límite de Signapis para documentos en base64
+
+/** Posición de la estampa si el admin no fijó una: página 1, abajo a la izquierda (px desde arriba a la izquierda). */
+const POSICION_POR_DEFECTO = { pagina: 1, x: 100, y: 650 };
 const EMAIL_INVALIDO = /[^\x00-\x7F]|[&'%$!"()*#=,;<>]|\.\./;
 
 /** Mensajes de Signapis traducidos para mostrar al usuario. */
@@ -275,11 +278,9 @@ export class SignapisProvider implements ISignatureProvider {
       redirectUrl: params.redirectUrl,
     };
     if (estampa.tipoEstampa === 2) body.signatureText = (estampa.textoEstampa || '').slice(0, 120);
-    if (estampa.posicion) {
-      body.positions = [
-        { pageNumber: String(estampa.posicion.pagina), x: String(estampa.posicion.x), y: String(estampa.posicion.y) },
-      ];
-    }
+    // Signapis responde "Invalid request body" si no van posiciones, aunque su documentación las marca opcionales.
+    const posicion = estampa.posicion ?? POSICION_POR_DEFECTO;
+    body.positions = [{ pageNumber: String(posicion.pagina), x: String(posicion.x), y: String(posicion.y) }];
 
     let firma: RespuestaSignapis<{ token: string; signUrl: string }>;
     try {
