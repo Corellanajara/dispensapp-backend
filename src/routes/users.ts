@@ -67,6 +67,7 @@ router.put(
       for (const k of ['nombre', 'apellido', 'telefono', 'role', 'sucursales', 'sucursalActiva', 'activo']) {
         if (req.body[k] !== undefined) updateData[k] = req.body[k];
       }
+      if (req.body.responsableFirma !== undefined) updateData.responsableFirma = req.body.responsableFirma === true;
       if (updateData.role !== undefined && !USER_ROLES.includes(updateData.role as never)) {
         res.status(400).json({ message: 'Rol inválido.' });
         return;
@@ -79,10 +80,24 @@ router.put(
         res.status(400).json({ message: 'No puedes quitarte el rol de administrador a ti mismo.' });
         return;
       }
+      // Solo administradores y operadores pueden validar y contrafirmar documentos de pacientes.
+      const actual = await User.findById(req.params.id).select('role');
+      if (!actual) {
+        res.status(404).json({ message: 'Usuario no encontrado.' });
+        return;
+      }
+      const rolFinal = (updateData.role as string | undefined) ?? actual.role;
+      if (!['admin', 'operador'].includes(rolFinal)) {
+        if (updateData.responsableFirma === true) {
+          res.status(400).json({ message: 'Solo un administrador u operador puede ser responsable de firma.' });
+          return;
+        }
+        updateData.responsableFirma = false;
+      }
       const user = await User.findByIdAndUpdate(req.params.id, updateData, {
         new: true,
         runValidators: true,
-      });
+      }).populate('sucursales', 'nombre codigo');
       if (!user) {
         res.status(404).json({ message: 'Usuario no encontrado.' });
         return;

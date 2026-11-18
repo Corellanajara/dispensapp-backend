@@ -27,6 +27,7 @@ import {
   solicitarCertificado,
   responderErrorFirma,
   retornoFirma,
+  etapaValidacion,
 } from '../services/firmas';
 import { requisitoPara } from '../services/configuracion';
 
@@ -131,6 +132,15 @@ const validarDocumento = [
 
 function conVigencia(patient: IPatient) {
   const json = patient.toJSON() as Record<string, unknown>;
+  // Etapa de cada documento que se firma (firma del paciente → validación del dispensario).
+  const docs = (json.documentos as Record<string, unknown>[] | undefined) ?? [];
+  for (const d of docs) {
+    const original = patient.documentos.id(String(d._id));
+    if (original) d.etapaFirma = etapaValidacion(original);
+    // El enlace de contrafirma es del responsable: no se entrega fuera de la bandeja.
+    const c = d.contrafirma as Record<string, unknown> | undefined;
+    if (c) delete c.signingUrl;
+  }
   const receta = recetaVigente(patient);
   json.recetaVigente = receta ? { _id: receta._id, fechaVencimiento: receta.fechaVencimiento } : null;
   json.requisitosActivacion = verificarRequisitosActivacion(patient);
@@ -304,7 +314,9 @@ router.get(
         res.status(404).json({ message: 'Documento no encontrado.' });
         return;
       }
-      const ref = req.query.firmado === 'true' && doc.firma?.archivoFirmado ? doc.firma.archivoFirmado : doc.archivo;
+      // "firmado" entrega la versión más completa: la contrafirmada por el dispensario, o la que firmó el paciente.
+      const firmadoFinal = doc.contrafirma?.archivoFirmado ?? doc.firma?.archivoFirmado;
+      const ref = req.query.firmado === 'true' && firmadoFinal ? firmadoFinal : doc.archivo;
       const url = await getDownloadUrl(ref, baseUrl(req));
       if (!url) {
         res.status(404).json({ message: 'El archivo no está disponible.' });
@@ -741,7 +753,9 @@ router.get(
         res.status(404).json({ message: 'Documento no encontrado.' });
         return;
       }
-      const ref = req.query.firmado === 'true' && doc.firma?.archivoFirmado ? doc.firma.archivoFirmado : doc.archivo;
+      // "firmado" entrega la versión más completa: la contrafirmada por el dispensario, o la que firmó el paciente.
+      const firmadoFinal = doc.contrafirma?.archivoFirmado ?? doc.firma?.archivoFirmado;
+      const ref = req.query.firmado === 'true' && firmadoFinal ? firmadoFinal : doc.archivo;
       const url = await getDownloadUrl(ref, baseUrl(req));
       if (!url) {
         res.status(404).json({ message: 'El archivo no está disponible.' });

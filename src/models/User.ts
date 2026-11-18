@@ -1,5 +1,6 @@
 import mongoose, { Schema, Document, Types } from 'mongoose';
 import bcrypt from 'bcryptjs';
+import { signerCertificateSchema, ISignerCertificate } from './shared';
 
 export type UserRole = 'admin' | 'operador' | 'produccion' | 'cultivo' | 'finanzas' | 'paciente';
 
@@ -19,6 +20,13 @@ export interface IUser extends Document {
   ultimoAcceso?: Date;
   intentosFallidos: number;
   bloqueadoHasta?: Date;
+  /**
+   * Responsable de firma del dispensario: valida y contrafirma lo que firman los pacientes
+   * de sus dispensarios. Solo admin u operador.
+   */
+  responsableFirma: boolean;
+  /** Certificado de firma electrónica avanzada del responsable (Signapis lo exige para firmar). */
+  certificadoFirma?: ISignerCertificate;
   createdAt: Date;
   updatedAt: Date;
   comparePassword(candidatePassword: string): Promise<boolean>;
@@ -87,6 +95,11 @@ const userSchema = new Schema<IUser>(
     bloqueadoHasta: {
       type: Date,
     },
+    responsableFirma: {
+      type: Boolean,
+      default: false,
+    },
+    certificadoFirma: signerCertificateSchema,
   },
   {
     timestamps: true,

@@ -24,6 +24,11 @@ export interface IConfigFirma {
   posicion?: { pagina: number; x: number; y: number } | null;
   /** Años de vigencia del certificado que se pide al paciente (1, 2 o 3). */
   vigenciaCertificadoAnios: 1 | 2 | 3;
+  /**
+   * Validación del dispensario: lo que firma el paciente queda pendiente hasta que un responsable
+   * de firma lo revise y lo contrafirme. Si lo rechaza, el paciente debe subir una nueva versión.
+   */
+  contrafirma: boolean;
 }
 
 export interface IConfiguracion extends Document {
@@ -42,6 +47,7 @@ export const CONFIG_FIRMA_POR_DEFECTO: IConfigFirma = {
   conQR: false,
   posicion: null,
   vigenciaCertificadoAnios: 1,
+  contrafirma: true,
 };
 
 const configFirmaSchema = new Schema<IConfigFirma>(
@@ -66,6 +72,7 @@ const configFirmaSchema = new Schema<IConfigFirma>(
       default: null,
     },
     vigenciaCertificadoAnios: { type: Number, enum: [1, 2, 3], default: 1 },
+    contrafirma: { type: Boolean, default: CONFIG_FIRMA_POR_DEFECTO.contrafirma },
   },
   { _id: false }
 );

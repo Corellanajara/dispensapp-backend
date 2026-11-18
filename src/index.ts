@@ -24,6 +24,7 @@ import reportRoutes from './routes/reports';
 import auditRoutes from './routes/audit';
 import paymentRoutes from './routes/payments';
 import signatureRoutes from './routes/signatures';
+import validacionRoutes from './routes/validacion';
 import sucursalRoutes from './routes/sucursales';
 import ubicacionRoutes from './routes/ubicaciones';
 import cultivoRoutes from './routes/cultivo';
@@ -104,6 +105,8 @@ app.get('/api/config', (_req, res) => {
       return {
         habilitada: cfg.habilitada,
         tiposConFirma: cfg.habilitada ? cfg.tiposConFirma : [],
+        // Lo firmado por el paciente debe validarlo y contrafirmarlo un responsable del dispensario.
+        contrafirma: cfg.habilitada && cfg.contrafirma,
         proveedor: info.name,
         ambiente: info.ambiente ?? null,
         requiereCertificado: info.requiereCertificado,
@@ -139,6 +142,7 @@ app.use('/api/reports', reportRoutes);
 app.use('/api/audit', auditRoutes);
 app.use('/api/payments', pagosGate, paymentRoutes);
 app.use('/api/signatures', signatureRoutes);
+app.use('/api/validacion-firmas', validacionRoutes);
 app.use('/api/sucursales', sucursalRoutes);
 app.use('/api/ubicaciones', ubicacionRoutes);
 app.use('/api/cultivo', cultivoRoutes);

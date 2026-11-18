@@ -18,6 +18,11 @@ export interface IDocument {
   revisadoPor?: Types.ObjectId;
   fechaRevision?: Date;
   firma?: IDocumentSignature;
+  /**
+   * Segunda firma: la del responsable del dispensario, sobre el PDF ya firmado por el paciente.
+   * solicitadoPor = el responsable que contrafirma.
+   */
+  contrafirma?: IDocumentSignature;
 }
 
 export interface IPatientStatusChange {
@@ -90,6 +95,7 @@ const documentSchema = new Schema<IDocument>(
     revisadoPor: { type: Schema.Types.ObjectId, ref: 'User' },
     fechaRevision: { type: Date },
     firma: documentSignatureSchema,
+    contrafirma: documentSignatureSchema,
   },
   { _id: true }
 );

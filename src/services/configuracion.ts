@@ -26,6 +26,7 @@ function limpiar(firma: Partial<IConfigFirma> | undefined): IConfigFirma {
     conQR: !!f.conQR,
     posicion: f.posicion ? { pagina: f.posicion.pagina, x: f.posicion.x, y: f.posicion.y } : null,
     vigenciaCertificadoAnios: f.vigenciaCertificadoAnios,
+    contrafirma: f.contrafirma !== false,
   };
 }
 
@@ -74,6 +75,11 @@ export async function actualizarConfigFirma(
 /** true si los documentos de este tipo se firman electrónicamente con la configuración actual. */
 export function tipoRequiereFirma(tipo: string): boolean {
   return firmaActual.habilitada && firmaActual.tiposConFirma.includes(tipo as DocumentType);
+}
+
+/** true si lo que firma el paciente en este tipo de documento debe validarlo y contrafirmarlo el dispensario. */
+export function tipoRequiereContrafirma(tipo: string): boolean {
+  return tipoRequiereFirma(tipo) && firmaActual.contrafirma;
 }
 
 /** Documentos exigidos al paciente, con la exigencia de firma según lo que decidió el administrador. */

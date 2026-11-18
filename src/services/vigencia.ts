@@ -1,6 +1,6 @@
 import { Types } from 'mongoose';
 import { Patient, IPatient, IDocument } from '../models/Patient';
-import { documentosRequeridos } from './configuracion';
+import { documentosRequeridos, tipoRequiereContrafirma } from './configuracion';
 import { env } from '../config/env';
 import { registrarAuditoria } from './audit';
 
@@ -51,8 +51,13 @@ export function verificarRequisitosActivacion(patient: Pick<IPatient, 'documento
       detalle = `${req.label} aprobada y vigente`;
     } else {
       const docs = (patient.documentos || []).filter((d) => d.tipo === req.tipo && d.estado === 'aprobado');
-      cumple = docs.length > 0 && (!req.requiereFirma || docs.some((d) => d.firma?.estado === 'firmado'));
-      detalle = req.requiereFirma ? `${req.label} aprobado y firmado` : `${req.label} aprobado`;
+      // Con firma: el paciente lo firmó y, si la validación del dispensario está activa, un responsable lo contrafirmó.
+      cumple = docs.length > 0 && (!req.requiereFirma || docs.some((d) => d.firma?.estado === 'firmado' && (!tipoRequiereContrafirma(d.tipo) || d.contrafirma?.estado === 'firmado')));
+      detalle = !req.requiereFirma
+        ? `${req.label} aprobado`
+        : tipoRequiereContrafirma(req.tipo)
+          ? `${req.label} firmado por el paciente y validado por el dispensario`
+          : `${req.label} aprobado y firmado`;
     }
 
     if (!cumple) {

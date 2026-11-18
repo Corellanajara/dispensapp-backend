@@ -88,6 +88,7 @@ router.put(
     body('tipoEstampa').optional().isIn([1, 2, 5]).withMessage('Tipo de estampa inválido'),
     body('textoEstampa').optional().isString().isLength({ max: 120 }).withMessage('El texto admite hasta 120 caracteres'),
     body('conQR').optional().isBoolean(),
+    body('contrafirma').optional().isBoolean().withMessage('contrafirma debe ser verdadero o falso'),
     body('vigenciaCertificadoAnios').optional().isIn([1, 2, 3]).withMessage('La vigencia debe ser 1, 2 o 3 años'),
     body('posicion').optional({ values: 'null' }).isObject(),
     body('posicion.pagina').optional().isInt({ min: 1 }).withMessage('Página inválida'),
@@ -104,7 +105,7 @@ router.put(
       }
       const antes = configFirma();
       const cambios: Record<string, unknown> = {};
-      for (const k of ['habilitada', 'tiposConFirma', 'tipoEstampa', 'textoEstampa', 'conQR', 'vigenciaCertificadoAnios']) {
+      for (const k of ['habilitada', 'tiposConFirma', 'tipoEstampa', 'textoEstampa', 'conQR', 'vigenciaCertificadoAnios', 'contrafirma']) {
         if (b[k] !== undefined) cambios[k] = b[k];
       }
       if (b.posicion !== undefined) {
