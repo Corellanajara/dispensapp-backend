@@ -27,8 +27,8 @@ export interface VariablePlantilla {
 }
 
 export const VARIABLES: VariablePlantilla[] = [
-  { clave: 'paciente_nombre', descripcion: 'Nombre completo del paciente', ejemplo: 'Christian Díaz' },
-  { clave: 'paciente_rut', descripcion: 'RUT del paciente', ejemplo: '13.241.708-3' },
+  { clave: 'paciente_nombre', descripcion: 'Nombre completo del paciente', ejemplo: 'María González Rojas' },
+  { clave: 'paciente_rut', descripcion: 'RUT del paciente', ejemplo: '11.111.111-1' },
   { clave: 'paciente_fecha_nacimiento', descripcion: 'Fecha de nacimiento', ejemplo: '10 de mayo de 1996' },
   { clave: 'paciente_direccion', descripcion: 'Dirección completa', ejemplo: 'Av. Providencia 1234, Providencia, Santiago' },
   { clave: 'paciente_comuna', descripcion: 'Comuna del paciente', ejemplo: 'Providencia' },
@@ -75,7 +75,7 @@ function fechaNacimiento(fecha: Date | string | undefined): string {
   return d.toLocaleDateString('es-CL', { day: 'numeric', month: 'long', year: 'numeric', timeZone: 'UTC' });
 }
 
-/** RUT con puntos y guion: 13241708-3 → 13.241.708-3. */
+/** RUT con puntos y guion: 11111111-1 → 11.111.111-1. */
 function rutConPuntos(rut: string): string {
   const limpio = String(rut ?? '').replace(/[^0-9kK]/g, '').toUpperCase();
   if (limpio.length < 2) return rut;
@@ -257,12 +257,17 @@ const MARGEN_SUP = 60;
 const MARGEN_INF = 64;
 
 /**
- * Zona de firmas en la última página. Signapis mide la posición desde la esquina superior izquierda:
- * las estampas van en y = 645, la del paciente a la izquierda y la del responsable 220 pt a la derecha
- * (ver posicionContrafirma en services/firmas.ts). Bajo los nombres la hoja queda libre para las estampas.
+ * Bloque de firmas: va justo después del texto y, si no cabe entero, al inicio de una hoja nueva.
+ * Signapis mide la posición desde la esquina superior izquierda: la estampa del paciente va
+ * ESTAMPA_BAJO_TITULO pt bajo el título "Firmas", a la izquierda, y la del responsable 220 pt a la
+ * derecha (ver posicionContrafirma en services/firmas.ts). Bajo los nombres queda libre para las estampas.
  */
-const ZONA_FIRMAS = 585;
-export const POSICION_FIRMA_GENERADA = { x: 72, y: 645 };
+const ESTAMPA_BAJO_TITULO = 60;
+/** Alto del bloque completo: título, nombres y el espacio de las estampas. */
+const ALTO_BLOQUE_FIRMAS = 160;
+/** Límite inferior del bloque, sobre el pie de página. */
+const LIMITE_FIRMAS = ALTO - 40;
+export const POSICION_FIRMA_GENERADA = { x: 72 };
 
 export interface PdfGenerado {
   buffer: Buffer;
@@ -362,8 +367,13 @@ export function generarPdf(opts: OpcionesPdf): Promise<PdfGenerado> {
     }
     cerrarParrafo();
 
-    // Bloque de firmas: en la última hoja, con la parte de abajo libre para las estampas.
-    if (doc.y > ZONA_FIRMAS - 16) doc.addPage();
+    // Bloque de firmas: sigue al texto; si no cabe entero en esta hoja, pasa al inicio de la siguiente.
+    let zonaFirmas = doc.y + 14;
+    if (zonaFirmas + ALTO_BLOQUE_FIRMAS > LIMITE_FIRMAS) {
+      doc.addPage();
+      zonaFirmas = MARGEN_SUP + 10;
+    }
+    const ZONA_FIRMAS = Math.round(zonaFirmas);
     const pagina = doc.bufferedPageRange().count;
     const col = 220;
     const x1 = POSICION_FIRMA_GENERADA.x;
@@ -416,7 +426,7 @@ export function generarPdf(opts: OpcionesPdf): Promise<PdfGenerado> {
     doc.on('end', () =>
       resolve({
         buffer: Buffer.concat(partes),
-        posicionFirma: { pagina, ...POSICION_FIRMA_GENERADA },
+        posicionFirma: { pagina, x: POSICION_FIRMA_GENERADA.x, y: ZONA_FIRMAS + ESTAMPA_BAJO_TITULO },
         paginas: rango.count,
       })
     );
