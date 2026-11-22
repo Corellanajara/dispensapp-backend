@@ -6,13 +6,14 @@ import { Sucursal } from '../models/Sucursal';
 import { Order } from '../models/Order';
 import { AuditLog } from '../models/AuditLog';
 import { EspacioCultivo, Cosecha } from '../models/Cultivo';
-import { DOCUMENT_TYPES } from '../config/documentos';
+import { DOCUMENT_TYPES, DOCUMENT_TYPE_LABELS, esTipoGenerado } from '../config/documentos';
 import { ensurePatientProfileForUser } from '../services/ensurePatientProfile';
 import { authenticate, authorize, AuthRequest } from '../middleware/auth';
 import { resolveSucursal, canAccessSucursal } from '../middleware/sucursal';
 import { auditLog } from '../middleware/audit';
 import { upload } from '../middleware/upload';
-import { uploadFile, getDownloadUrl } from '../services/storage';
+import { uploadFile, getDownloadUrl, saveBuffer, deleteFile } from '../services/storage';
+import { generarDocumentoPaciente } from '../services/plantillas';
 import { registrarAuditoria } from '../services/audit';
 import {
   recetaVigente,
@@ -123,6 +124,71 @@ async function crearDocumento(req: AuthRequest, res: Response): Promise<IDocumen
     observaciones: req.body.observaciones,
   } as IDocument;
 }
+
+/**
+ * Genera (o regenera) el reglamento o el contrato del paciente desde la plantilla vigente.
+ * - Si el último de ese tipo ya está en firma o firmado, se devuelve tal cual.
+ * - Si existe pero aún no se firma, se rehace con los datos y el texto actuales (mismo documento).
+ * - Si no existe o fue rechazado, se crea uno nuevo.
+ * El llamador guarda el paciente. La sucursal del paciente debe venir poblada.
+ */
+async function generarDocumento(
+  req: AuthRequest,
+  patient: IPatient,
+  tipo: string
+): Promise<{ doc: IDocument; generado: boolean }> {
+  if (!esTipoGenerado(tipo)) throw new Error('TIPO_NO_GENERADO');
+  const ultimo = [...patient.documentos]
+    .filter((d) => d.tipo === tipo)
+    .sort((a, b) => new Date(b.fechaSubida).getTime() - new Date(a.fechaSubida).getTime())[0] as IDocument | undefined;
+
+  if (ultimo && ultimo.estado !== 'rechazado' && ['enviado', 'firmado'].includes(ultimo.firma?.estado ?? '')) {
+    return { doc: ultimo, generado: false };
+  }
+
+  const { buffer, posicionFirma, plantilla } = await generarDocumentoPaciente(tipo, patient);
+  const archivo = await saveBuffer(buffer, `${tipo}.pdf`, 'application/pdf', { privado: true });
+  const nombre = `${plantilla.titulo || DOCUMENT_TYPE_LABELS[tipo]} - ${patient.nombre} ${patient.apellido}`.trim();
+  const generado = { plantillaVersion: plantilla.version, fecha: new Date() };
+
+  let doc: IDocument;
+  if (ultimo && ultimo.estado !== 'rechazado' && ultimo.generado && !ultimo.firma) {
+    const anterior = ultimo.archivo;
+    ultimo.archivo = archivo;
+    ultimo.nombre = nombre;
+    ultimo.fechaSubida = new Date();
+    ultimo.subidoPor = req.user!._id as Types.ObjectId;
+    ultimo.generado = generado;
+    ultimo.posicionFirma = posicionFirma;
+    doc = ultimo;
+    void deleteFile(anterior);
+  } else {
+    patient.documentos.push({
+      tipo,
+      nombre,
+      archivo,
+      fechaSubida: new Date(),
+      subidoPor: req.user!._id as Types.ObjectId,
+      estado: 'pendiente',
+      generado,
+      posicionFirma,
+    } as IDocument);
+    doc = patient.documentos[patient.documentos.length - 1] as IDocument;
+  }
+
+  void registrarAuditoria({
+    req,
+    usuario: req.user!._id as Types.ObjectId,
+    accion: 'generar_documento',
+    entidad: 'paciente',
+    entidadId: patient._id as Types.ObjectId,
+    sucursal: patient.sucursal,
+    detalles: { documento: doc._id, tipo, plantillaVersion: plantilla.version },
+  });
+  return { doc, generado: true };
+}
+
+const validarGenerar = [body('tipo').custom((t) => esTipoGenerado(String(t))).withMessage('Ese documento no lo genera la plataforma')];
 
 const validarDocumento = [
   body('tipo').isIn(DOCUMENT_TYPES).withMessage('Tipo de documento inválido'),
@@ -288,6 +354,12 @@ router.post(
         res.status(409).json({ message: SIN_PERFIL });
         return;
       }
+      if (esTipoGenerado(req.body.tipo)) {
+        res.status(400).json({
+          message: `${DOCUMENT_TYPE_LABELS[req.body.tipo as keyof typeof DOCUMENT_TYPE_LABELS]} lo genera la plataforma con tus datos: no hay que subirlo, solo firmarlo.`,
+        });
+        return;
+      }
       const doc = await crearDocumento(req, res);
       if (!doc) return;
 
@@ -297,6 +369,35 @@ router.post(
     } catch (error) {
       console.error('Upload patient document error:', error);
       res.status(500).json({ message: 'Error al subir documento.' });
+    }
+  }
+);
+
+// POST /api/patients/me/documents/generar — la plataforma arma el reglamento o el contrato del paciente
+router.post(
+  '/me/documents/generar',
+  authenticate,
+  authorize('paciente'),
+  validarGenerar,
+  async (req: AuthRequest, res: Response): Promise<void> => {
+    const errors = validationResult(req);
+    if (!errors.isEmpty()) {
+      res.status(400).json({ message: errors.array()[0].msg, errors: errors.array() });
+      return;
+    }
+    try {
+      const patient = await ensurePatientProfileForUser(req.user!);
+      if (!patient) {
+        res.status(409).json({ message: SIN_PERFIL });
+        return;
+      }
+      await patient.populate('sucursal', 'nombre codigo direccion telefono horarioAtencion');
+      const { doc, generado } = await generarDocumento(req, patient, String(req.body.tipo));
+      await patient.save();
+      res.status(generado ? 201 : 200).json({ paciente: conVigencia(patient), documentoId: doc._id, generado });
+    } catch (error) {
+      console.error('Generate own document error:', error);
+      res.status(500).json({ message: 'Error al generar el documento.' });
     }
   }
 );
@@ -678,6 +779,39 @@ router.post(
     } catch (error) {
       console.error('Upload document error:', error);
       res.status(500).json({ message: 'Error al subir documento.' });
+    }
+  }
+);
+
+// POST /api/patients/:id/documents/generar — el personal genera el reglamento o el contrato del paciente
+router.post(
+  '/:id/documents/generar',
+  authenticate,
+  authorize('admin', 'operador'),
+  validarGenerar,
+  async (req: AuthRequest, res: Response): Promise<void> => {
+    const errors = validationResult(req);
+    if (!errors.isEmpty()) {
+      res.status(400).json({ message: errors.array()[0].msg, errors: errors.array() });
+      return;
+    }
+    try {
+      const patient = await cargarPacienteConAcceso(req, res);
+      if (!patient) return;
+      await patient.populate('sucursal', 'nombre codigo direccion');
+      const { doc, generado } = await generarDocumento(req, patient, String(req.body.tipo));
+      await patient.save();
+      await patient.populate([
+        { path: 'usuario', select: 'email nombre apellido' },
+        { path: 'activadoPor', select: 'nombre apellido email' },
+        { path: 'historialEstados.usuario', select: 'nombre apellido' },
+        { path: 'documentos.revisadoPor', select: 'nombre apellido' },
+        { path: 'documentos.subidoPor', select: 'nombre apellido role' },
+      ]);
+      res.status(generado ? 201 : 200).json({ paciente: conVigencia(patient), documentoId: doc._id, generado });
+    } catch (error) {
+      console.error('Generate document error:', error);
+      res.status(500).json({ message: 'Error al generar el documento.' });
     }
   }
 );

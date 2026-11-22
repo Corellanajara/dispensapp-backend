@@ -4,7 +4,7 @@ import { Patient, IPatient, IDocument } from '../models/Patient';
 import { FirmaDemo } from '../models/FirmaDemo';
 import { User, IUser } from '../models/User';
 import type { IDocumentSignature, ISignerCertificate } from '../models/shared';
-import { DOCUMENT_TYPE_LABELS, DocumentType } from '../config/documentos';
+import { DOCUMENT_TYPE_LABELS, DocumentType, esTipoGenerado } from '../config/documentos';
 import { comunaSignapis } from '../config/comunas';
 import { env } from '../config/env';
 import {
@@ -291,7 +291,13 @@ export async function solicitarFirmaDocumento(
 ): Promise<SignatureInitResult> {
   exigirFirma(doc.tipo);
   if (doc.estado === 'rechazado') {
-    throw new FirmaError('El documento fue rechazado. Sube una nueva versión antes de firmar.', 400, 'ESTADO');
+    throw new FirmaError(
+      esTipoGenerado(doc.tipo)
+        ? 'El documento fue rechazado. Genera una nueva versión antes de firmar.'
+        : 'El documento fue rechazado. Sube una nueva versión antes de firmar.',
+      400,
+      'ESTADO'
+    );
   }
   if (doc.firma?.estado === 'firmado') {
     throw new FirmaError('El documento ya está firmado.', 409, 'ESTADO');
@@ -349,7 +355,8 @@ export async function solicitarFirmaDocumento(
       tipoEstampa: cfg.tipoEstampa,
       textoEstampa: cfg.textoEstampa,
       conQR: cfg.conQR,
-      posicion: cfg.posicion,
+      // Los documentos que genera la plataforma traen su propio espacio de firma.
+      posicion: posicionDe(doc) ?? cfg.posicion,
     },
   });
 
@@ -690,7 +697,7 @@ export async function solicitarContrafirma(
 
   const cfg = configFirma();
   const etiqueta = DOCUMENT_TYPE_LABELS[doc.tipo as DocumentType] ?? doc.tipo;
-  const posicion = cfg.posicion ?? { pagina: 1, x: 100, y: 650 };
+  const posicion = posicionDe(doc) ?? cfg.posicion ?? { pagina: 1, x: 100, y: 650 };
   const result = await provider.requestSignature({
     documentId: `${doc._id.toString()}-contrafirma`,
     documentName: `${etiqueta} ${formatearRut(patient.rut)} validado`,
@@ -723,6 +730,12 @@ export async function solicitarContrafirma(
   };
   const { raw: _raw, ...publico } = result;
   return publico;
+}
+
+/** Posición de firma guardada en el documento (los que genera la plataforma). */
+function posicionDe(doc: IDocument): { pagina: number; x: number; y: number } | null {
+  const p = doc.posicionFirma;
+  return p && p.pagina && p.x != null && p.y != null ? { pagina: p.pagina, x: p.x, y: p.y } : null;
 }
 
 /**

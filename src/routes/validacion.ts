@@ -6,8 +6,9 @@ import { authenticate, authorize, AuthRequest } from '../middleware/auth';
 import { resolveSucursal, getSucursalFilter, canAccessSucursal } from '../middleware/sucursal';
 import { getDownloadUrl } from '../services/storage';
 import { registrarAuditoria } from '../services/audit';
-import { configFirma, tipoRequiereFirma } from '../services/configuracion';
-import { DOCUMENT_TYPE_LABELS, DocumentType } from '../config/documentos';
+import { configFirma, tipoRequiereFirma, documentosRequeridos } from '../services/configuracion';
+import { DOCUMENT_TYPE_LABELS, DocumentType, REQUIRED_DOCUMENTS } from '../config/documentos';
+import { reactivarSiCorresponde } from '../services/vigencia';
 import {
   etapaValidacion,
   EtapaValidacion,
@@ -25,11 +26,53 @@ import {
 /**
  * Validación del dispensario: lo que firma el paciente queda en esta bandeja hasta que un
  * responsable de firma lo revise y lo contrafirme con su propio certificado, o lo rechace
- * (el paciente sube una nueva versión y vuelve a firmar). Se repite hasta que cumple.
+ * (el paciente genera o sube una nueva versión y vuelve a firmar). Se repite hasta que cumple.
+ *
+ * También llegan aquí los documentos que el paciente sube y el dispensario solo revisa
+ * (hoy el certificado de antecedentes): se aprueban o se rechazan, sin firma.
  */
 const router = Router();
 
-const ETAPAS_PENDIENTES: EtapaValidacion[] = ['por_validar', 'contrafirma_en_curso'];
+/** "por_revisar": documento sin firma que el dispensario aprueba o rechaza. */
+type EtapaBandeja = EtapaValidacion | 'por_revisar';
+
+const ETAPAS_PENDIENTES: EtapaBandeja[] = ['por_validar', 'contrafirma_en_curso', 'por_revisar'];
+
+/** Tipos sin firma que se revisan en la bandeja. */
+const TIPOS_REVISION = REQUIRED_DOCUMENTS.filter((r) => r.revisionEnBandeja).map((r) => r.tipo as string);
+
+function etapaBandeja(doc: IDocument): EtapaBandeja {
+  if (TIPOS_REVISION.includes(doc.tipo) && !tipoRequiereFirma(doc.tipo)) {
+    if (doc.estado === 'pendiente') return 'por_revisar';
+    return doc.estado === 'aprobado' ? 'completo' : 'rechazado';
+  }
+  return etapaValidacion(doc);
+}
+
+type EstadoRequisito = 'falta' | 'por_firmar' | 'firmando' | 'por_validar' | 'por_revisar' | 'rechazado' | 'listo';
+
+/** Cómo va cada documento exigido del paciente (para ver el expediente completo en la bandeja). */
+function progresoPaciente(patient: IPatient): { tipo: string; etiqueta: string; estado: EstadoRequisito }[] {
+  const ultimos = new Map(ultimosPorTipo(patient).map((d) => [d.tipo as string, d]));
+  return documentosRequeridos().map((req) => {
+    const d = ultimos.get(req.tipo);
+    let estado: EstadoRequisito;
+    if (!d) estado = req.generadoPorPlataforma && req.requiereFirma ? 'por_firmar' : 'falta';
+    else if (d.estado === 'rechazado') estado = 'rechazado';
+    else if (req.requiereFirma) {
+      const etapa = etapaValidacion(d);
+      estado =
+        etapa === 'completo'
+          ? 'listo'
+          : etapa === 'firma_paciente'
+            ? d.firma?.estado === 'enviado'
+              ? 'firmando'
+              : 'por_firmar'
+            : 'por_validar';
+    } else estado = d.estado === 'aprobado' ? 'listo' : 'por_revisar';
+    return { tipo: req.tipo, etiqueta: req.label, estado };
+  });
+}
 
 function validar(req: AuthRequest, res: Response): boolean {
   const errors = validationResult(req);
@@ -60,7 +103,7 @@ function nombreDe(ref: unknown): string | undefined {
   return undefined;
 }
 
-function itemBandeja(patient: IPatient, doc: IDocument, etapa: EtapaValidacion) {
+function itemBandeja(patient: IPatient, doc: IDocument, etapa: EtapaBandeja, progreso?: ReturnType<typeof progresoPaciente>) {
   const sucursal = patient.sucursal as unknown as { _id?: Types.ObjectId; nombre?: string; codigo?: string } | undefined;
   return {
     paciente: {
@@ -68,6 +111,7 @@ function itemBandeja(patient: IPatient, doc: IDocument, etapa: EtapaValidacion) 
       nombre: `${patient.nombre} ${patient.apellido}`.trim(),
       rut: patient.rut,
       sucursal: sucursal?.nombre ? { _id: sucursal._id, nombre: sucursal.nombre, codigo: sucursal.codigo } : null,
+      progreso: progreso ?? progresoPaciente(patient),
     },
     documento: {
       _id: doc._id,
@@ -76,6 +120,7 @@ function itemBandeja(patient: IPatient, doc: IDocument, etapa: EtapaValidacion) 
       nombre: doc.nombre,
       fechaSubida: doc.fechaSubida,
       estado: doc.estado,
+      generado: !!doc.generado,
       observaciones: doc.observaciones,
     },
     etapa,
@@ -103,7 +148,13 @@ function itemBandeja(patient: IPatient, doc: IDocument, etapa: EtapaValidacion) 
 }
 
 async function pacientesConFirmas(req: AuthRequest) {
-  return Patient.find({ ...getSucursalFilter(req), 'documentos.firma.estado': 'firmado' })
+  return Patient.find({
+    ...getSucursalFilter(req),
+    $or: [
+      { 'documentos.firma.estado': 'firmado' },
+      { documentos: { $elemMatch: { tipo: { $in: TIPOS_REVISION }, estado: 'pendiente' } } },
+    ],
+  })
     .select('nombre apellido rut sucursal documentos')
     .populate('sucursal', 'nombre codigo')
     .populate('documentos.contrafirma.solicitadoPor', 'nombre apellido');
@@ -118,15 +169,15 @@ router.get(
   async (req: AuthRequest, res: Response): Promise<void> => {
     try {
       const cfg = configFirma();
-      if (!cfg.habilitada || !cfg.contrafirma) {
-        res.json({ activa: false, pendientes: 0, responsable: !!req.user!.responsableFirma });
-        return;
-      }
+      const activa = cfg.habilitada && cfg.contrafirma;
       let pendientes = 0;
       for (const p of await pacientesConFirmas(req)) {
-        for (const d of ultimosPorTipo(p)) if (ETAPAS_PENDIENTES.includes(etapaValidacion(d))) pendientes++;
+        for (const d of ultimosPorTipo(p)) {
+          const etapa = etapaBandeja(d);
+          if (etapa === 'por_revisar' || (activa && ETAPAS_PENDIENTES.includes(etapa))) pendientes++;
+        }
       }
-      res.json({ activa: true, pendientes, responsable: !!req.user!.responsableFirma });
+      res.json({ activa, pendientes, responsable: !!req.user!.responsableFirma });
     } catch (error) {
       responderErrorFirma(res, error, 'Error al contar documentos por validar');
     }
@@ -145,15 +196,21 @@ router.get(
       const pendientes: ReturnType<typeof itemBandeja>[] = [];
       const validados: ReturnType<typeof itemBandeja>[] = [];
       for (const p of await pacientesConFirmas(req)) {
+        const progreso = progresoPaciente(p);
         for (const d of ultimosPorTipo(p)) {
+          const etapa = etapaBandeja(d);
+          if (etapa === 'por_revisar') {
+            pendientes.push(itemBandeja(p, d, etapa, progreso));
+            continue;
+          }
           if (!tipoRequiereFirma(d.tipo)) continue;
-          const etapa = etapaValidacion(d);
-          if (ETAPAS_PENDIENTES.includes(etapa)) pendientes.push(itemBandeja(p, d, etapa));
-          else if (etapa === 'completo' && d.contrafirma?.estado === 'firmado') validados.push(itemBandeja(p, d, etapa));
+          if (ETAPAS_PENDIENTES.includes(etapa)) pendientes.push(itemBandeja(p, d, etapa, progreso));
+          else if (etapa === 'completo' && d.contrafirma?.estado === 'firmado') validados.push(itemBandeja(p, d, etapa, progreso));
         }
       }
       // Lo que lleva más tiempo esperando, primero.
-      const fechaPaciente = (i: ReturnType<typeof itemBandeja>) => new Date(i.firmaPaciente?.fechaFirma ?? 0).getTime();
+      const fechaPaciente = (i: ReturnType<typeof itemBandeja>) =>
+        new Date(i.firmaPaciente?.fechaFirma ?? i.documento.fechaSubida ?? 0).getTime();
       pendientes.sort((a, b) => fechaPaciente(a) - fechaPaciente(b));
       const fechaValidacion = (i: ReturnType<typeof itemBandeja>) => new Date(i.contrafirma?.fechaFirma ?? 0).getTime();
       validados.sort((a, b) => fechaValidacion(b) - fechaValidacion(a));
@@ -253,7 +310,7 @@ async function responderItem(res: Response, patient: IPatient, doc: IDocument, e
     { path: 'documentos.contrafirma.solicitadoPor', select: 'nombre apellido' },
   ]);
   const actualizado = patient.documentos.id(doc._id) as IDocument;
-  res.json({ ...extra, item: itemBandeja(patient, actualizado, etapaValidacion(actualizado)) });
+  res.json({ ...extra, item: itemBandeja(patient, actualizado, etapaBandeja(actualizado)) });
 }
 
 // POST /api/validacion-firmas/:patientId/:docId/firmar — el responsable contrafirma
@@ -327,6 +384,46 @@ router.post(
       await responderItem(res, patient, doc);
     } catch (error) {
       responderErrorFirma(res, error, 'Error al rechazar el documento');
+    }
+  }
+);
+
+// POST /api/validacion-firmas/:patientId/:docId/aprobar — aprueba un documento sin firma (certificado de antecedentes)
+router.post(
+  '/:patientId/:docId/aprobar',
+  authenticate,
+  authorize('admin', 'operador'),
+  [body('observaciones').optional().isString().isLength({ max: 500 })],
+  async (req: AuthRequest, res: Response): Promise<void> => {
+    if (!validar(req, res)) return;
+    try {
+      const user = req.user!;
+      if (user.role !== 'admin') exigirResponsable(user);
+      const found = await cargar(req, res);
+      if (!found) return;
+      const { patient, doc } = found;
+      if (etapaBandeja(doc) !== 'por_revisar') {
+        res.status(409).json({ message: 'Este documento no está esperando revisión.' });
+        return;
+      }
+      doc.estado = 'aprobado';
+      if (req.body.observaciones) doc.observaciones = String(req.body.observaciones);
+      doc.revisadoPor = user._id as Types.ObjectId;
+      doc.fechaRevision = new Date();
+      reactivarSiCorresponde(patient, user._id as Types.ObjectId);
+      await patient.save();
+      void registrarAuditoria({
+        req,
+        usuario: user._id as Types.ObjectId,
+        accion: 'revisar_documento',
+        entidad: 'paciente',
+        entidadId: patient._id as Types.ObjectId,
+        sucursal: patient.sucursal,
+        detalles: { documento: doc._id, tipo: doc.tipo, estado: 'aprobado', desde: 'bandeja' },
+      });
+      await responderItem(res, patient, doc);
+    } catch (error) {
+      responderErrorFirma(res, error, 'Error al aprobar el documento');
     }
   }
 );

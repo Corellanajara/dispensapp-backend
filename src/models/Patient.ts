@@ -23,6 +23,10 @@ export interface IDocument {
    * solicitadoPor = el responsable que contrafirma.
    */
   contrafirma?: IDocumentSignature;
+  /** Documento generado por la plataforma desde una plantilla (reglamento, contrato). */
+  generado?: { plantillaVersion: number; fecha: Date };
+  /** Dónde va la estampa del paciente (la del responsable va al lado). Vacío = la configuración general. */
+  posicionFirma?: { pagina: number; x: number; y: number };
 }
 
 export interface IPatientStatusChange {
@@ -96,6 +100,14 @@ const documentSchema = new Schema<IDocument>(
     fechaRevision: { type: Date },
     firma: documentSignatureSchema,
     contrafirma: documentSignatureSchema,
+    generado: {
+      type: new Schema({ plantillaVersion: Number, fecha: Date }, { _id: false }),
+      default: undefined,
+    },
+    posicionFirma: {
+      type: new Schema({ pagina: Number, x: Number, y: Number }, { _id: false }),
+      default: undefined,
+    },
   },
   { _id: true }
 );
