@@ -10,6 +10,8 @@ import { cargarConfiguracion, configFirma, documentosRequeridos } from './servic
 import { getProvider } from './services/signature';
 import { PUBLIC_DIR, estadoAlmacenamiento } from './services/storage';
 import { iniciarRevisionVigencias } from './services/vigencia';
+// Registra los ganchos del paciente: avisos por etapa del registro y activación automática.
+import { inicializarEtapas } from './services/etapas';
 
 // Route imports
 import authRoutes from './routes/auth';
@@ -25,6 +27,7 @@ import auditRoutes from './routes/audit';
 import paymentRoutes from './routes/payments';
 import signatureRoutes from './routes/signatures';
 import validacionRoutes from './routes/validacion';
+import notificacionRoutes from './routes/notificaciones';
 import plantillaRoutes from './routes/plantillas';
 import sucursalRoutes from './routes/sucursales';
 import ubicacionRoutes from './routes/ubicaciones';
@@ -144,6 +147,7 @@ app.use('/api/audit', auditRoutes);
 app.use('/api/payments', pagosGate, paymentRoutes);
 app.use('/api/signatures', signatureRoutes);
 app.use('/api/validacion-firmas', validacionRoutes);
+app.use('/api/notificaciones', notificacionRoutes);
 app.use('/api/plantillas', plantillaRoutes);
 app.use('/api/sucursales', sucursalRoutes);
 app.use('/api/ubicaciones', ubicacionRoutes);
@@ -178,6 +182,7 @@ app.use((err: Error, _req: Request, res: Response, _next: NextFunction) => {
 const startServer = async () => {
   await connectDB();
   await cargarConfiguracion();
+  await inicializarEtapas().catch((err) => console.error('[etapas] No se pudo inicializar:', err));
   iniciarRevisionVigencias();
   app.listen(env.PORT, () => {
     console.log(`Server running on port ${env.PORT} in ${env.NODE_ENV} mode`);

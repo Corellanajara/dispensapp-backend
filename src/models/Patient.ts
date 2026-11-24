@@ -1,9 +1,62 @@
 import mongoose, { Schema, Document, Types } from 'mongoose';
 import { DOCUMENT_TYPES, DocumentType } from '../config/documentos';
+import type { ProductType } from './Product';
 import { documentSignatureSchema, IDocumentSignature, signerCertificateSchema, ISignerCertificate } from './shared';
 
 export type PatientStatus = 'pendiente' | 'aprobado' | 'rechazado' | 'suspendido';
 export type SuspensionReason = 'receta_vencida' | 'manual';
+
+/**
+ * Etapa del registro del paciente:
+ * 1. documentos: debe subir la receta médica y el certificado de antecedentes.
+ * 2. revision: los subió y el dispensario los revisa.
+ * 3. firma / validacion: firma el reglamento y el contrato; el dispensario los valida y contrafirma.
+ * activacion: todo listo, falta que un administrador lo active (firma electrónica apagada o falta dispensario).
+ * activo, suspendido, rechazado: siguen el estado del paciente.
+ */
+export type EtapaRegistro =
+  | 'documentos'
+  | 'revision'
+  | 'firma'
+  | 'validacion'
+  | 'activacion'
+  | 'activo'
+  | 'suspendido'
+  | 'rechazado';
+
+export const ETAPAS_REGISTRO: EtapaRegistro[] = [
+  'documentos',
+  'revision',
+  'firma',
+  'validacion',
+  'activacion',
+  'activo',
+  'suspendido',
+  'rechazado',
+];
+
+/** Lo que autoriza la receta: lo registra el administrador al aprobarla. */
+export interface IItemPrescripcion {
+  _id?: Types.ObjectId;
+  /** Tipo de producto autorizado (flor, aceite…). */
+  tipoProducto: ProductType;
+  /** Producto puntual, si la receta lo indica. Vacío = cualquier producto de ese tipo. */
+  producto?: Types.ObjectId;
+  /** Nombre del producto al registrarlo (para leerlo sin buscar el producto). */
+  nombreProducto?: string;
+  /** Lo que dice la receta, ej. "Aceite CBD 10%, 3 gotas cada 12 h". */
+  descripcion?: string;
+  /** Unidades que puede retirar cada 30 días. Vacío o 0 = sin tope propio (aplica el límite general). */
+  cantidadMensual?: number;
+}
+
+export interface IPrescripcion {
+  items: IItemPrescripcion[];
+  /** Indicaciones generales de la receta (dosis, duración del tratamiento…). */
+  indicaciones?: string;
+  registradoPor?: Types.ObjectId;
+  fecha?: Date;
+}
 
 export interface IDocument {
   _id: Types.ObjectId;
@@ -27,6 +80,8 @@ export interface IDocument {
   generado?: { plantillaVersion: number; fecha: Date };
   /** Dónde va la estampa del paciente (la del responsable va al lado). Vacío = la configuración general. */
   posicionFirma?: { pagina: number; x: number; y: number };
+  /** Solo recetas: lo que autoriza dispensar. */
+  prescripcion?: IPrescripcion;
 }
 
 export interface IPatientStatusChange {
@@ -65,6 +120,8 @@ export interface IPatient extends Document {
   /** Certificado de firma electrónica avanzada del paciente (si el proveedor lo exige). */
   certificadoFirma?: ISignerCertificate;
   estado: PatientStatus;
+  /** Última etapa del registro calculada al guardar (para avisar los cambios de etapa). */
+  etapaRegistro?: EtapaRegistro;
   motivoSuspension?: SuspensionReason;
   activadoPor?: Types.ObjectId;
   fechaActivacion?: Date;
@@ -77,6 +134,31 @@ export interface IPatient extends Document {
   createdAt: Date;
   updatedAt: Date;
 }
+
+const itemPrescripcionSchema = new Schema<IItemPrescripcion>(
+  {
+    tipoProducto: {
+      type: String,
+      enum: ['flor', 'aceite', 'crema', 'capsula', 'tintura', 'comestible', 'otro'],
+      required: true,
+    },
+    producto: { type: Schema.Types.ObjectId, ref: 'Product' },
+    nombreProducto: { type: String },
+    descripcion: { type: String, trim: true, maxlength: 300 },
+    cantidadMensual: { type: Number, min: 0 },
+  },
+  { _id: true }
+);
+
+const prescripcionSchema = new Schema<IPrescripcion>(
+  {
+    items: { type: [itemPrescripcionSchema], default: [] },
+    indicaciones: { type: String, trim: true, maxlength: 1000 },
+    registradoPor: { type: Schema.Types.ObjectId, ref: 'User' },
+    fecha: { type: Date },
+  },
+  { _id: false }
+);
 
 const documentSchema = new Schema<IDocument>(
   {
@@ -108,6 +190,7 @@ const documentSchema = new Schema<IDocument>(
       type: new Schema({ pagina: Number, x: Number, y: Number }, { _id: false }),
       default: undefined,
     },
+    prescripcion: { type: prescripcionSchema, default: undefined },
   },
   { _id: true }
 );
@@ -182,6 +265,7 @@ const patientSchema = new Schema<IPatient>(
       enum: ['pendiente', 'aprobado', 'rechazado', 'suspendido'],
       default: 'pendiente',
     },
+    etapaRegistro: { type: String, enum: ETAPAS_REGISTRO },
     motivoSuspension: {
       type: String,
       enum: ['receta_vencida', 'manual'],
@@ -209,5 +293,25 @@ patientSchema.index({ 'medicoTratante.nombre': 1 });
 patientSchema.index({ 'documentos.tipo': 1, 'documentos.fechaVencimiento': 1 });
 patientSchema.index({ 'documentos.firma.signatureId': 1 });
 patientSchema.index({ 'certificadoFirma.token': 1 }, { sparse: true });
+
+/**
+ * Ganchos al guardar un paciente. Los registra services/etapas.ts (avisos de cambio de etapa y
+ * activación automática); se dejan como referencia para no importar servicios desde el modelo.
+ */
+export const ganchosPaciente: {
+  alCargar?: (patient: IPatient) => void;
+  antesDeGuardar?: (patient: IPatient) => void;
+  despuesDeGuardar?: (patient: IPatient) => void;
+} = {};
+
+patientSchema.post('init', function (doc) {
+  ganchosPaciente.alCargar?.(doc as IPatient);
+});
+patientSchema.pre('save', function () {
+  ganchosPaciente.antesDeGuardar?.(this as IPatient);
+});
+patientSchema.post('save', function (doc) {
+  ganchosPaciente.despuesDeGuardar?.(doc as IPatient);
+});
 
 export const Patient = mongoose.model<IPatient>('Patient', patientSchema);

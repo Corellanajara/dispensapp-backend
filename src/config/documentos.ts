@@ -7,6 +7,9 @@
  * - 22-11-2026: el reglamento y el contrato los genera la plataforma desde plantillas que edita el
  *   administrador (con los datos del paciente); el paciente solo los firma. El certificado de
  *   antecedentes lo sube el paciente y el dispensario lo revisa en la bandeja de validación.
+ * - 23-11-2026: registro por etapas (services/etapas.ts). Etapa 1: el paciente sube receta y certificado.
+ *   Etapa 2: el dispensario los revisa en la bandeja; al aprobar la receta registra lo que autoriza
+ *   dispensar. Etapa 3: firma reglamento y contrato y el dispensario contrafirma; ahí queda activo.
  *
  * Para cambiar qué se exige, edita esta lista. El frontend lee la misma lista desde GET /api/config.
  */
@@ -59,10 +62,11 @@ export const REQUIRED_DOCUMENTS: DocumentRequirement[] = [
   {
     tipo: 'receta_medica',
     label: 'Receta médica',
-    descripcion: 'Receta vigente emitida por el médico tratante, con fecha de vencimiento.',
+    descripcion: 'Receta vigente emitida por el médico tratante. El dispensario registra lo que autoriza dispensar.',
     requiereFirma: false,
     requiereVencimiento: true,
     bloqueaActivacion: true,
+    revisionEnBandeja: true,
   },
   {
     tipo: 'certificado_antecedentes',
@@ -70,7 +74,7 @@ export const REQUIRED_DOCUMENTS: DocumentRequirement[] = [
     descripcion: 'Certificado de antecedentes del paciente. Lo sube el paciente y lo revisa el dispensario.',
     requiereFirma: false,
     requiereVencimiento: false,
-    bloqueaActivacion: false,
+    bloqueaActivacion: true,
     revisionEnBandeja: true,
   },
   {

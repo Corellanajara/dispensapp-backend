@@ -13,6 +13,7 @@ import { auditLog } from '../middleware/audit';
 import { generateOrderNumber } from '../utils/helpers';
 import { env } from '../config/env';
 import { recetaVigente } from '../services/vigencia';
+import { validarContraPrescripcion, PrescripcionError } from '../services/prescripcion';
 import { registrarAuditoria } from '../services/audit';
 import {
   disponibleParaDispensar,
@@ -142,7 +143,7 @@ async function prepararItems(
 }
 
 function responderError(res: Response, error: unknown, fallback: string, log: string) {
-  if (error instanceof NotaError || error instanceof StockError) {
+  if (error instanceof NotaError || error instanceof StockError || error instanceof PrescripcionError) {
     res.status(error.status).json({ message: error.message });
     return;
   }
@@ -161,6 +162,7 @@ async function crearNota(
     patient,
     items.reduce((s, i) => s + i.cantidad, 0)
   );
+  await validarContraPrescripcion(patient, items);
 
   const order = new Order({
     numeroPedido: generateOrderNumber(),
@@ -600,6 +602,7 @@ router.patch(
             order.items.reduce((s, i) => s + i.cantidad, 0),
             order._id as Types.ObjectId
           );
+          await validarContraPrescripcion(patient, order.items, order._id as Types.ObjectId);
         }
       }
 

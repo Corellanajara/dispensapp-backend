@@ -43,6 +43,14 @@ export const env = {
   FLOW_SERVICE_URL: process.env.FLOW_SERVICE_URL || 'http://localhost:3800',
   FRONTEND_URL: process.env.FRONTEND_URL || 'http://localhost:5173',
 
+  // Correo saliente para las notificaciones (SMTP de cualquier proveedor). Sin SMTP_HOST solo hay avisos en la app.
+  SMTP_HOST: process.env.SMTP_HOST || '',
+  SMTP_PORT: parseInt(process.env.SMTP_PORT || '587', 10),
+  SMTP_USER: process.env.SMTP_USER || '',
+  SMTP_PASS: process.env.SMTP_PASS || '',
+  // Remitente, ej. "Dispensapp <avisos@dispensapp.cl>". Por defecto SMTP_USER.
+  SMTP_FROM: process.env.SMTP_FROM || process.env.SMTP_USER || '',
+
   // Cobros al paciente. Apagado por defecto: en la reunión se indicó que no puede haber pagos.
   PAGOS_HABILITADOS: process.env.PAGOS_HABILITADOS === 'true',
   // Secreto compartido para webhooks (Flow y proveedor de firma). Sin él, los webhooks se rechazan.

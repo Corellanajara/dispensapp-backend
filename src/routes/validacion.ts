@@ -6,9 +6,11 @@ import { authenticate, authorize, AuthRequest } from '../middleware/auth';
 import { resolveSucursal, getSucursalFilter, canAccessSucursal } from '../middleware/sucursal';
 import { getDownloadUrl } from '../services/storage';
 import { registrarAuditoria } from '../services/audit';
-import { configFirma, tipoRequiereFirma, documentosRequeridos } from '../services/configuracion';
+import { configFirma, tipoRequiereFirma, documentosRequeridos, requisitoPara } from '../services/configuracion';
 import { DOCUMENT_TYPE_LABELS, DocumentType, REQUIRED_DOCUMENTS } from '../config/documentos';
-import { reactivarSiCorresponde } from '../services/vigencia';
+import { reactivarSiCorresponde, inicioDelDia } from '../services/vigencia';
+import { leerPrescripcion, PrescripcionError } from '../services/prescripcion';
+import { calcularEtapa } from '../services/etapas';
 import {
   etapaValidacion,
   EtapaValidacion,
@@ -112,6 +114,7 @@ function itemBandeja(patient: IPatient, doc: IDocument, etapa: EtapaBandeja, pro
       rut: patient.rut,
       sucursal: sucursal?.nombre ? { _id: sucursal._id, nombre: sucursal.nombre, codigo: sucursal.codigo } : null,
       progreso: progreso ?? progresoPaciente(patient),
+      etapaRegistro: calcularEtapa(patient),
     },
     documento: {
       _id: doc._id,
@@ -122,6 +125,11 @@ function itemBandeja(patient: IPatient, doc: IDocument, etapa: EtapaBandeja, pro
       estado: doc.estado,
       generado: !!doc.generado,
       observaciones: doc.observaciones,
+      fechaVencimiento: doc.fechaVencimiento,
+      // La receta se aprueba con su vencimiento y con lo que autoriza dispensar.
+      requiereVencimiento: !!requisitoPara(doc.tipo)?.requiereVencimiento,
+      requierePrescripcion: doc.tipo === 'receta_medica',
+      prescripcion: doc.prescripcion,
     },
     etapa,
     firmaPaciente: doc.firma
@@ -155,7 +163,7 @@ async function pacientesConFirmas(req: AuthRequest) {
       { documentos: { $elemMatch: { tipo: { $in: TIPOS_REVISION }, estado: 'pendiente' } } },
     ],
   })
-    .select('nombre apellido rut sucursal documentos')
+    .select('nombre apellido rut estado sucursal documentos')
     .populate('sucursal', 'nombre codigo')
     .populate('documentos.contrafirma.solicitadoPor', 'nombre apellido');
 }
@@ -388,12 +396,16 @@ router.post(
   }
 );
 
-// POST /api/validacion-firmas/:patientId/:docId/aprobar — aprueba un documento sin firma (certificado de antecedentes)
+// POST /api/validacion-firmas/:patientId/:docId/aprobar — aprueba un documento sin firma
+// (certificado de antecedentes, o la receta con su vencimiento y lo que autoriza dispensar)
 router.post(
   '/:patientId/:docId/aprobar',
   authenticate,
   authorize('admin', 'operador'),
-  [body('observaciones').optional().isString().isLength({ max: 500 })],
+  [
+    body('observaciones').optional().isString().isLength({ max: 500 }),
+    body('fechaVencimiento').optional({ values: 'falsy' }).isISO8601().withMessage('Fecha de vencimiento inválida'),
+  ],
   async (req: AuthRequest, res: Response): Promise<void> => {
     if (!validar(req, res)) return;
     try {
@@ -405,6 +417,20 @@ router.post(
       if (etapaBandeja(doc) !== 'por_revisar') {
         res.status(409).json({ message: 'Este documento no está esperando revisión.' });
         return;
+      }
+      if (requisitoPara(doc.tipo)?.requiereVencimiento) {
+        if (req.body.fechaVencimiento) doc.fechaVencimiento = new Date(req.body.fechaVencimiento);
+        if (!doc.fechaVencimiento) {
+          res.status(400).json({ message: 'Indica hasta cuándo es válida la receta.' });
+          return;
+        }
+        if (new Date(doc.fechaVencimiento) < inicioDelDia()) {
+          res.status(400).json({ message: 'La receta ya está vencida: recházala para que el paciente suba una vigente.' });
+          return;
+        }
+      }
+      if (doc.tipo === 'receta_medica') {
+        doc.prescripcion = await leerPrescripcion(req.body.prescripcion, user._id as Types.ObjectId);
       }
       doc.estado = 'aprobado';
       if (req.body.observaciones) doc.observaciones = String(req.body.observaciones);
@@ -423,6 +449,10 @@ router.post(
       });
       await responderItem(res, patient, doc);
     } catch (error) {
+      if (error instanceof PrescripcionError) {
+        res.status(400).json({ message: error.message });
+        return;
+      }
       responderErrorFirma(res, error, 'Error al aprobar el documento');
     }
   }

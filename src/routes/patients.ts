@@ -31,6 +31,8 @@ import {
   etapaValidacion,
 } from '../services/firmas';
 import { requisitoPara } from '../services/configuracion';
+import { calcularEtapa } from '../services/etapas';
+import { leerPrescripcion, prescripcionVigente, PrescripcionError } from '../services/prescripcion';
 
 const router = Router();
 
@@ -210,7 +212,26 @@ function conVigencia(patient: IPatient) {
   const receta = recetaVigente(patient);
   json.recetaVigente = receta ? { _id: receta._id, fechaVencimiento: receta.fechaVencimiento } : null;
   json.requisitosActivacion = verificarRequisitosActivacion(patient);
+  json.etapaRegistro = calcularEtapa(patient);
+  // Lo que autoriza dispensar la receta vigente (null si no hay receta vigente o es anterior a las prescripciones).
+  json.prescripcion = prescripcionVigente(patient);
   return json;
+}
+
+/**
+ * El paciente nuevo firma el reglamento y el contrato recién en la etapa 3, cuando el dispensario
+ * aprobó su receta y su certificado. Devuelve el mensaje de bloqueo, o null si puede firmar.
+ */
+function bloqueoFirmaRegistro(patient: IPatient): string | null {
+  if (patient.estado !== 'pendiente') return null;
+  const etapa = calcularEtapa(patient);
+  if (etapa === 'documentos') {
+    return 'Primero sube tu receta médica y tu certificado de antecedentes. Cuando el dispensario los apruebe podrás firmar.';
+  }
+  if (etapa === 'revision') {
+    return 'El dispensario está revisando tu receta y tu certificado. Te avisaremos cuando puedas firmar.';
+  }
+  return null;
 }
 
 // ─── Listado y alertas ─────────────────────────────────────
@@ -391,6 +412,11 @@ router.post(
         res.status(409).json({ message: SIN_PERFIL });
         return;
       }
+      const bloqueo = bloqueoFirmaRegistro(patient);
+      if (bloqueo) {
+        res.status(409).json({ message: bloqueo, codigo: 'ETAPA' });
+        return;
+      }
       await patient.populate('sucursal', 'nombre codigo direccion telefono horarioAtencion');
       const { doc, generado } = await generarDocumento(req, patient, String(req.body.tipo));
       await patient.save();
@@ -454,6 +480,11 @@ router.post(
       const doc = patient && buscarDocumento(patient, String(req.params.docId));
       if (!patient || !doc) {
         res.status(404).json({ message: 'Documento no encontrado.' });
+        return;
+      }
+      const bloqueo = esTipoGenerado(doc.tipo) ? bloqueoFirmaRegistro(patient) : null;
+      if (bloqueo) {
+        res.status(409).json({ message: bloqueo, codigo: 'ETAPA' });
         return;
       }
       const result = await solicitarFirmaDocumento(patient, doc, req.user!._id as Types.ObjectId, {
@@ -851,6 +882,9 @@ router.patch(
         return;
       }
 
+      if (req.body.estado === 'aprobado' && doc.tipo === 'receta_medica') {
+        doc.prescripcion = await leerPrescripcion(req.body.prescripcion, req.user!._id as Types.ObjectId);
+      }
       doc.estado = req.body.estado;
       doc.observaciones = req.body.observaciones ?? doc.observaciones;
       doc.revisadoPor = req.user!._id as Types.ObjectId;
@@ -867,8 +901,53 @@ router.patch(
       ]);
       res.json({ ...conVigencia(patient), reactivado });
     } catch (error) {
+      if (error instanceof PrescripcionError) {
+        res.status(400).json({ message: error.message });
+        return;
+      }
       console.error('Review document error:', error);
       res.status(500).json({ message: 'Error al revisar documento.' });
+    }
+  }
+);
+
+// PUT /api/patients/:id/documents/:docId/prescripcion — el administrador corrige lo que autoriza una receta aprobada
+router.put(
+  '/:id/documents/:docId/prescripcion',
+  authenticate,
+  authorize('admin'),
+  auditLog('actualizar_prescripcion', 'paciente'),
+  async (req: AuthRequest, res: Response): Promise<void> => {
+    try {
+      const patient = await cargarPacienteConAcceso(req, res);
+      if (!patient) return;
+      const doc = buscarDocumento(patient, String(req.params.docId));
+      if (!doc || doc.tipo !== 'receta_medica') {
+        res.status(404).json({ message: 'Receta no encontrada.' });
+        return;
+      }
+      if (doc.estado !== 'aprobado') {
+        res.status(409).json({ message: 'Primero aprueba la receta: lo que autoriza se registra al aprobarla.' });
+        return;
+      }
+      doc.prescripcion = await leerPrescripcion(req.body.prescripcion, req.user!._id as Types.ObjectId);
+      await patient.save();
+      await patient.populate([
+        { path: 'usuario', select: 'email nombre apellido' },
+        { path: 'sucursal', select: 'nombre codigo' },
+        { path: 'activadoPor', select: 'nombre apellido email' },
+        { path: 'historialEstados.usuario', select: 'nombre apellido' },
+        { path: 'documentos.revisadoPor', select: 'nombre apellido' },
+        { path: 'documentos.subidoPor', select: 'nombre apellido role' },
+      ]);
+      res.json(conVigencia(patient));
+    } catch (error) {
+      if (error instanceof PrescripcionError) {
+        res.status(400).json({ message: error.message });
+        return;
+      }
+      console.error('Update prescription error:', error);
+      res.status(500).json({ message: 'Error al guardar lo que autoriza la receta.' });
     }
   }
 );
