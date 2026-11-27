@@ -3,6 +3,8 @@ import { body, validationResult } from 'express-validator';
 import mongoose, { Types } from 'mongoose';
 import { Patient, IPatient, IDocument } from '../models/Patient';
 import { Sucursal } from '../models/Sucursal';
+import { User } from '../models/User';
+import { asignarClaveTemporal } from '../services/claves';
 import { Order } from '../models/Order';
 import { AuditLog } from '../models/AuditLog';
 import { EspacioCultivo, Cosecha } from '../models/Cultivo';
@@ -779,6 +781,51 @@ router.patch(
     } catch (error) {
       console.error('Update patient status error:', error);
       res.status(500).json({ message: 'Error al actualizar estado.' });
+    }
+  }
+);
+
+// POST /api/patients/:id/reiniciar-password — el personal genera una clave temporal para el portal del paciente.
+// La clave se muestra una sola vez; el paciente debe cambiarla al entrar.
+router.post(
+  '/:id/reiniciar-password',
+  authenticate,
+  authorize('admin', 'operador'),
+  async (req: AuthRequest, res: Response): Promise<void> => {
+    try {
+      const patient = await cargarPacienteConAcceso(req, res);
+      if (!patient) return;
+
+      const user = patient.usuario ? await User.findById(patient.usuario) : null;
+      if (!user || user.role !== 'paciente') {
+        res.status(409).json({
+          message: 'Este paciente no tiene cuenta en el portal. Debe registrarse con su RUT para crearla.',
+        });
+        return;
+      }
+      if (!user.activo) {
+        res.status(409).json({ message: 'La cuenta del paciente está desactivada.' });
+        return;
+      }
+
+      const { clave, expira } = asignarClaveTemporal(user);
+      await user.save();
+
+      // La clave nunca se registra: solo quién la reinició y cuándo.
+      await registrarAuditoria({
+        req,
+        usuario: req.user!._id as Types.ObjectId,
+        accion: 'reiniciar_password',
+        entidad: 'paciente',
+        entidadId: patient._id as Types.ObjectId,
+        sucursal: patient.sucursal,
+        detalles: { cuenta: user.email, expira },
+      });
+
+      res.json({ claveTemporal: clave, expira, email: user.email });
+    } catch (error) {
+      console.error('Reset patient password error:', error);
+      res.status(500).json({ message: 'Error al reiniciar la clave.' });
     }
   }
 );

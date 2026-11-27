@@ -7,6 +7,7 @@ import { Sucursal } from '../models/Sucursal';
 import { env } from '../config/env';
 import { authenticate, authorize, AuthRequest } from '../middleware/auth';
 import { registrarAuditoria } from '../services/audit';
+import { asignarClaveDefinitiva, CLAVE_MINIMA } from '../services/claves';
 
 const router = Router();
 
@@ -300,6 +301,12 @@ router.post(
         return;
       }
 
+      if (user.debeCambiarPassword && user.passwordTemporalExpira && user.passwordTemporalExpira < new Date()) {
+        await fallo('clave_temporal_vencida', String(user._id));
+        res.status(401).json({ message: 'Tu clave temporal venció. Pide al dispensario una nueva.' });
+        return;
+      }
+
       user.intentosFallidos = 0;
       user.bloqueadoHasta = undefined;
       user.ultimoAcceso = new Date();
@@ -328,6 +335,7 @@ router.post(
           role: user.role,
           sucursales: await sucursalesDisponibles(populatedUser),
           sucursalActiva: populatedUser?.sucursalActiva || null,
+          debeCambiarPassword: user.debeCambiarPassword,
         },
       });
     } catch (error) {
@@ -351,6 +359,79 @@ router.get('/me', authenticate, async (req: AuthRequest, res: Response): Promise
     res.status(500).json({ message: 'Error al obtener usuario.' });
   }
 });
+
+// POST /api/auth/cambiar-password — el usuario cambia su clave (obligatorio si entró con una temporal).
+router.post(
+  '/cambiar-password',
+  authenticate,
+  [
+    body('passwordActual').notEmpty().withMessage('Ingresa tu clave actual'),
+    body('passwordNueva')
+      .isLength({ min: CLAVE_MINIMA })
+      .withMessage(`La clave nueva debe tener al menos ${CLAVE_MINIMA} caracteres`),
+  ],
+  async (req: AuthRequest, res: Response): Promise<void> => {
+    const errors = validationResult(req);
+    if (!errors.isEmpty()) {
+      res.status(400).json({ message: errors.array()[0].msg, errors: errors.array() });
+      return;
+    }
+    try {
+      const user = req.user!;
+      const { passwordActual, passwordNueva } = req.body as { passwordActual: string; passwordNueva: string };
+
+      if (!(await user.comparePassword(passwordActual))) {
+        await registrarAuditoria({
+          req,
+          usuario: String(user._id),
+          accion: 'cambiar_password',
+          entidad: 'usuario',
+          entidadId: String(user._id),
+          resultado: 'fallo',
+          detalles: { motivo: 'clave_actual_incorrecta' },
+        });
+        res.status(400).json({ message: 'La clave actual no es correcta.' });
+        return;
+      }
+      if (passwordNueva === passwordActual) {
+        res.status(400).json({ message: 'La clave nueva debe ser distinta de la actual.' });
+        return;
+      }
+
+      const eraTemporal = user.debeCambiarPassword;
+      asignarClaveDefinitiva(user, passwordNueva);
+      await user.save();
+
+      await registrarAuditoria({
+        req,
+        usuario: String(user._id),
+        accion: 'cambiar_password',
+        entidad: 'usuario',
+        entidadId: String(user._id),
+        detalles: { eraTemporal },
+      });
+
+      // Las sesiones anteriores quedan sin efecto; esta sigue con un token nuevo.
+      const populatedUser = await User.findById(user._id).populate('sucursales', 'nombre codigo');
+      res.json({
+        token: generateToken(String(user._id), user.role),
+        user: {
+          id: user._id,
+          email: user.email,
+          nombre: user.nombre,
+          apellido: user.apellido,
+          role: user.role,
+          sucursales: await sucursalesDisponibles(populatedUser),
+          sucursalActiva: populatedUser?.sucursalActiva || null,
+          debeCambiarPassword: false,
+        },
+      });
+    } catch (error) {
+      console.error('Change password error:', error);
+      res.status(500).json({ message: 'Error al cambiar la clave.' });
+    }
+  }
+);
 
 // PATCH /api/auth/sucursal-activa
 router.patch(

@@ -68,6 +68,8 @@ export const env = {
   // Protección de login
   LOGIN_MAX_INTENTOS: parseInt(process.env.LOGIN_MAX_INTENTOS || '5', 10),
   LOGIN_BLOQUEO_MINUTOS: parseInt(process.env.LOGIN_BLOQUEO_MINUTOS || '15', 10),
+  // Horas que dura la clave temporal que genera el dispensario al reiniciar la clave de un paciente.
+  CLAVE_TEMPORAL_HORAS: parseInt(process.env.CLAVE_TEMPORAL_HORAS || '72', 10),
 
   // Vigencia de recetas: días de anticipación para avisar.
   DIAS_AVISO_RECETA: parseInt(process.env.DIAS_AVISO_RECETA || '30', 10),

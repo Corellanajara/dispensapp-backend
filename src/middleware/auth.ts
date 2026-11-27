@@ -3,6 +3,7 @@ import jwt from 'jsonwebtoken';
 import mongoose from 'mongoose';
 import { env } from '../config/env';
 import { User, IUser, UserRole } from '../models/User';
+import { tokenAnteriorAlCambio } from '../services/claves';
 
 export interface AuthRequest extends Request {
   user?: IUser;
@@ -12,7 +13,11 @@ export interface AuthRequest extends Request {
 interface JwtPayload {
   id: string;
   role: UserRole;
+  iat?: number;
 }
+
+/** Lo único que puede hacer quien entró con una clave temporal: ver su sesión y cambiarla. */
+const PERMITIDO_CON_CLAVE_TEMPORAL = ['/api/auth/me', '/api/auth/cambiar-password'];
 
 export const authenticate = async (
   req: AuthRequest,
@@ -32,6 +37,20 @@ export const authenticate = async (
 
     if (!user || !user.activo) {
       res.status(401).json({ message: 'Token inválido o usuario inactivo.' });
+      return;
+    }
+
+    // La clave se cambió o reinició después de emitir este token: la sesión ya no vale.
+    if (tokenAnteriorAlCambio(user, decoded.iat)) {
+      res.status(401).json({ message: 'Tu clave cambió. Inicia sesión de nuevo.' });
+      return;
+    }
+
+    if (user.debeCambiarPassword && !PERMITIDO_CON_CLAVE_TEMPORAL.includes(req.originalUrl.split('?')[0])) {
+      res.status(403).json({
+        message: 'Debes cambiar tu clave temporal antes de continuar.',
+        codigo: 'DEBE_CAMBIAR_PASSWORD',
+      });
       return;
     }
 

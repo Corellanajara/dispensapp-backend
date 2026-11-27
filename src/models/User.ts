@@ -27,6 +27,12 @@ export interface IUser extends Document {
   responsableFirma: boolean;
   /** Certificado de firma electrónica avanzada del responsable (Signapis lo exige para firmar). */
   certificadoFirma?: ISignerCertificate;
+  /** La clave actual es temporal (la dio el dispensario): debe cambiarla antes de usar la plataforma. */
+  debeCambiarPassword: boolean;
+  /** Hasta cuándo sirve la clave temporal. */
+  passwordTemporalExpira?: Date;
+  /** Último cambio o reinicio de clave: los tokens emitidos antes dejan de valer. */
+  credencialesCambiadasEn?: Date;
   createdAt: Date;
   updatedAt: Date;
   comparePassword(candidatePassword: string): Promise<boolean>;
@@ -100,6 +106,16 @@ const userSchema = new Schema<IUser>(
       default: false,
     },
     certificadoFirma: signerCertificateSchema,
+    debeCambiarPassword: {
+      type: Boolean,
+      default: false,
+    },
+    passwordTemporalExpira: {
+      type: Date,
+    },
+    credencialesCambiadasEn: {
+      type: Date,
+    },
   },
   {
     timestamps: true,
